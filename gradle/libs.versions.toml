@@ -55,10 +55,10 @@ androidx-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-man
 r8 = { group = "com.android.tools", name = "r8", version = "8.5.10" }
 
 [plugins]
-android-application = { id = "com.android.application", version = "z" }
+android-application = { id = "com.android.application", version = "8.2.2" }
 android-kotlin = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-ksp = { id = "com.google.devtools.ksp", version = "2.0.0-1.0.21" }
 hilt = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }
 compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
-android-library = { id = "com.android.library", version = "8.1.2" }
+android-library = { id = "com.android.library", version = "8.2.2" }
 kotlin-parcelize = { id = "org.jetbrains.kotlin.plugin.parcelize", version.ref = "kotlin" }
