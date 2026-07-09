@@ -716,7 +716,7 @@ fun SendToEmailsContent(
     }
 }
 
-// Read emails helper from raw resources
+// Read emails helper from raw resources (scans all cells in all rows to find emails)
 fun readEmailsFromRawResource(context: Context): List<String> {
     val emails = mutableListOf<String>()
     try {
@@ -724,10 +724,12 @@ fun readEmailsFromRawResource(context: Context): List<String> {
             val workbook = WorkbookFactory.create(inputStream)
             val sheet = workbook.getSheetAt(0)
             for (row in sheet) {
-                val cell = row.getCell(0)
-                val email = cell?.toString()?.trim()
-                if (!email.isNullOrBlank() && android.util.Patterns.EMAIL_ADDRESS.matcher(email).matches()) {
-                    emails.add(email)
+                for (cell in row) {
+                    val value = cell?.toString()?.trim()
+                    if (!value.isNullOrBlank() && android.util.Patterns.EMAIL_ADDRESS.matcher(value).matches()) {
+                        emails.add(value)
+                        break // Move to the next row once an email is found in this row
+                    }
                 }
             }
             workbook.close()
@@ -738,7 +740,7 @@ fun readEmailsFromRawResource(context: Context): List<String> {
     return emails
 }
 
-// Read emails from URI helper
+// Read emails from URI helper (scans all cells in all rows to find emails)
 fun readEmailsFromExcel(context: Context, uri: Uri): List<String> {
     val emails = mutableListOf<String>()
     try {
@@ -746,10 +748,12 @@ fun readEmailsFromExcel(context: Context, uri: Uri): List<String> {
             val workbook = WorkbookFactory.create(inputStream)
             val sheet = workbook.getSheetAt(0)
             for (row in sheet) {
-                val cell = row.getCell(0)
-                val email = cell?.toString()?.trim()
-                if (!email.isNullOrBlank() && android.util.Patterns.EMAIL_ADDRESS.matcher(email).matches()) {
-                    emails.add(email)
+                for (cell in row) {
+                    val value = cell?.toString()?.trim()
+                    if (!value.isNullOrBlank() && android.util.Patterns.EMAIL_ADDRESS.matcher(value).matches()) {
+                        emails.add(value)
+                        break // Move to the next row once an email is found in this row
+                    }
                 }
             }
             workbook.close()
