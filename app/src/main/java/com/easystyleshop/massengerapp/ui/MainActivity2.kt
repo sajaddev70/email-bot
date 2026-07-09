@@ -34,19 +34,17 @@ class MainActivity2 : ComponentActivity() {
                             onSend = { senderEmail, senderPassword, email, subject, content ->
                                 withContext(Dispatchers.IO) {
                                     try {
+                                        // 1. Try secure SMTP via SSL on Port 465 (Preferred for Gmail)
                                         val props = Properties().apply {
-                                            put("mail.smtp.auth", "true")
-                                            put("mail.smtp.starttls.enable", "true")
                                             put("mail.smtp.host", "smtp.gmail.com")
-                                            put("mail.smtp.port", "587")
+                                            put("mail.smtp.port", "465")
+                                            put("mail.smtp.auth", "true")
+                                            put("mail.smtp.socketFactory.port", "465")
+                                            put("mail.smtp.socketFactory.class", "javax.net.ssl.SSLSocketFactory")
+                                            put("mail.smtp.socketFactory.fallback", "false")
                                         }
 
-                                        val session = Session.getInstance(props, object : Authenticator() {
-                                            override fun getPasswordAuthentication(): PasswordAuthentication {
-                                                return PasswordAuthentication(senderEmail, senderPassword)
-                                            }
-                                        })
-
+                                        val session = Session.getInstance(props, null)
                                         val mimeMessage = MimeMessage(session).apply {
                                             setFrom(InternetAddress(senderEmail))
                                             setRecipients(Message.RecipientType.TO, InternetAddress.parse(email))
@@ -54,13 +52,44 @@ class MainActivity2 : ComponentActivity() {
                                             setText(content)
                                         }
 
-                                        Transport.send(mimeMessage)
-                                        Log.d("MainActivity2", "Email sent successfully to: $email")
+                                        val transport = session.getTransport("smtp")
+                                        transport.connect("smtp.gmail.com", senderEmail, senderPassword)
+                                        transport.sendMessage(mimeMessage, mimeMessage.allRecipients)
+                                        transport.close()
+                                        Log.d("MainActivity2", "Email sent successfully via SSL (465) to: $email")
                                         true
-                                    } catch (e: Exception) {
-                                        e.printStackTrace()
-                                        Log.e("MainActivity2", "Failed to send email to: $email, error: ${e.message}")
-                                        false
+                                    } catch (sslEx: Exception) {
+                                        sslEx.printStackTrace()
+                                        Log.e("MainActivity2", "SSL (465) failed, attempting STARTTLS (587) fallback... Error: ${sslEx.message}")
+
+                                        try {
+                                            // 2. Fallback to STARTTLS on Port 587
+                                            val props = Properties().apply {
+                                                put("mail.smtp.host", "smtp.gmail.com")
+                                                put("mail.smtp.port", "587")
+                                                put("mail.smtp.auth", "true")
+                                                put("mail.smtp.starttls.enable", "true")
+                                            }
+
+                                            val session = Session.getInstance(props, null)
+                                            val mimeMessage = MimeMessage(session).apply {
+                                                setFrom(InternetAddress(senderEmail))
+                                                setRecipients(Message.RecipientType.TO, InternetAddress.parse(email))
+                                                setSubject(subject)
+                                                setText(content)
+                                            }
+
+                                            val transport = session.getTransport("smtp")
+                                            transport.connect("smtp.gmail.com", senderEmail, senderPassword)
+                                            transport.sendMessage(mimeMessage, mimeMessage.allRecipients)
+                                            transport.close()
+                                            Log.d("MainActivity2", "Email sent successfully via STARTTLS (587) to: $email")
+                                            true
+                                        } catch (fallbackEx: Exception) {
+                                            fallbackEx.printStackTrace()
+                                            Log.e("MainActivity2", "Both SMTP ports (465 & 587) failed to send email to: $email. Error: ${fallbackEx.message}")
+                                            false
+                                        }
                                     }
                                 }
                             }
