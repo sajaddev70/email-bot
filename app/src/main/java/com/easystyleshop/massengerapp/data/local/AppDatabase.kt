@@ -6,11 +6,17 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import com.easystyleshop.massengerapp.data.model.Message
 import com.easystyleshop.massengerapp.data.model.User
+import com.easystyleshop.massengerapp.data.model.EmailQueueItem
 
-@Database(entities = [User::class, Message::class], version = 1, exportSchema = false)
+@Database(
+    entities = [User::class, Message::class, EmailQueueItem::class],
+    version = 2,
+    exportSchema = false
+)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun userDao(): UserDao
     abstract fun messageDao(): MessageDao
+    abstract fun emailQueueDao(): EmailQueueDao
 
     companion object {
         @Volatile
@@ -22,7 +28,9 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "messenger_database"
-                ).build()
+                )
+                    .fallbackToDestructiveMigration()
+                    .build()
                 INSTANCE = instance
                 instance
             }
