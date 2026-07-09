@@ -607,7 +607,15 @@ fun SendToEmailsContent(
                         }
 
                         // Send call
-                        val success = onSend(senderEmail, senderPassword, item.email, subject, content)
+                        var success = false
+                        var isWebLoginRequired = false
+                        try {
+                            success = onSend(senderEmail, senderPassword, item.email, subject, content)
+                        } catch (e: Exception) {
+                            if (e is javax.mail.AuthenticationFailedException || e.message?.contains("WebLoginRequired") == true) {
+                                isWebLoginRequired = true
+                            }
+                        }
 
                         val sdfGregorian = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
                         val gregorianTime = sdfGregorian.format(Date())
@@ -633,6 +641,16 @@ fun SendToEmailsContent(
                             withContext(Dispatchers.Main) {
                                 batchFailedCount++
                                 addLog("خطا در ارسال ایمیل به ${item.email} ❌", false)
+                                if (isWebLoginRequired) {
+                                    val helpMsg = "⚠️ خطای امنیتی گوگل (WebLoginRequired) رخ داد!\n" +
+                                                  "گوگل اتصال مستقیم را مسدود کرده است.\n" +
+                                                  "علت: پسورد وارد شده کلمه عبور عادی شماست، یا پسورد اشتباه است.\n" +
+                                                  "راه‌حل:\n" +
+                                                  "۱. مطمئن شوید تایید دو مرحله‌ای (2-Step Verification) در جیمیل شما فعال است.\n" +
+                                                  "۲. یک پسورد برنامه ۱۶ رقمی مخصوص (App Password) بسازید و استفاده کنید.\n" +
+                                                  "۳. بررسی کنید کلمه عبور را درست وارد کرده باشید."
+                                    addLog(helpMsg, false)
+                                }
                             }
                         }
 
