@@ -9,6 +9,7 @@ import androidx.annotation.RequiresApi
 import com.easystyleshop.massengerapp.data.model.Email
 import com.easystyleshop.massengerapp.data.model.FormModel
 import com.easystyleshop.massengerapp.data.model.TelegramUser
+import com.easystyleshop.massengerapp.data.model.SentEmailReport
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.apache.poi.xssf.usermodel.XSSFWorkbook
@@ -215,7 +216,56 @@ suspend fun createTelegramUserExcel(context: Context, users: List<TelegramUser>)
     }
 }
 
+fun createSentEmailsReportExcel(context: Context, reports: List<SentEmailReport>) {
+    val workbook = XSSFWorkbook()
+    val sheet = workbook.createSheet("Sent Emails Report")
 
+    val header = sheet.createRow(0)
+    header.createCell(0).setCellValue("Sender (از فرستنده)")
+    header.createCell(1).setCellValue("Recipient (به گیرنده)")
+    header.createCell(2).setCellValue("Subject (موضوع)")
+    header.createCell(3).setCellValue("Body Content (محتوا)")
+    header.createCell(4).setCellValue("Sent At (Gregorian میلادی)")
 
+    reports.forEachIndexed { index, report ->
+        val row = sheet.createRow(index + 1)
+        row.createCell(0).setCellValue(report.sender)
+        row.createCell(1).setCellValue(report.recipient)
+        row.createCell(2).setCellValue(report.subject)
+        row.createCell(3).setCellValue(report.body)
+        row.createCell(4).setCellValue(report.sentAtGregorian)
+    }
 
+    val filename = "sent_emails_report_${System.currentTimeMillis()}.xlsx"
+    val mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
+    val contentValues = ContentValues().apply {
+        put(MediaStore.Downloads.DISPLAY_NAME, filename)
+        put(MediaStore.Downloads.MIME_TYPE, mimeType)
+        put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+        put(MediaStore.Downloads.IS_PENDING, 1)
+    }
+
+    val resolver = context.contentResolver
+    val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
+
+    if (uri != null) {
+        try {
+            resolver.openOutputStream(uri).use { outputStream ->
+                workbook.write(outputStream)
+                outputStream?.flush()
+            }
+            workbook.close()
+
+            contentValues.clear()
+            contentValues.put(MediaStore.Downloads.IS_PENDING, 0)
+            resolver.update(uri, contentValues, null, null)
+
+            Toast.makeText(context, "گزارش اکسل در پوشه Downloads ذخیره شد! ✅", Toast.LENGTH_LONG).show()
+        } catch (e: Exception) {
+            Toast.makeText(context, "خطا در ذخیره گزارش اکسل: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    } else {
+        Toast.makeText(context, "ایجاد فایل گزارش ممکن نبود ❌", Toast.LENGTH_SHORT).show()
+    }
+}

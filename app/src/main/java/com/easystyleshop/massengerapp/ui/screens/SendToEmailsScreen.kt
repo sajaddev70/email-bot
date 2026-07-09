@@ -32,6 +32,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.easystyleshop.massengerapp.data.local.AppDatabase
 import com.easystyleshop.massengerapp.data.model.EmailQueueItem
+import com.easystyleshop.massengerapp.data.model.SentEmailReport
+import com.easystyleshop.massengerapp.util.createSentEmailsReportExcel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -488,7 +490,7 @@ fun SendToEmailsContent(
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(180.dp),
+                        .height(200.dp),
                     colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E)),
                     shape = RoundedCornerShape(12.dp)
                 ) {
@@ -499,7 +501,7 @@ fun SendToEmailsContent(
                             color = Color.LightGray,
                             modifier = Modifier.padding(bottom = 6.dp)
                         )
-                        Divider(color = Color.DarkGray, modifier = Modifier.padding(bottom = 6.dp))
+                        HorizontalDivider(color = Color.DarkGray, modifier = Modifier.padding(bottom = 6.dp))
 
                         if (liveLogs.isEmpty()) {
                             Box(
@@ -595,6 +597,8 @@ fun SendToEmailsContent(
                         addLog("شروع ارسال بسته شماره $currentBatchNum شامل ${currentBatchList.size} ایمیل...", true)
                     }
 
+                    val sentReportsList = mutableListOf<SentEmailReport>()
+
                     for (item in currentBatchList) {
                         if (!isSending) break // Safe cancellation
 
@@ -605,9 +609,21 @@ fun SendToEmailsContent(
                         // Send call
                         val success = onSend(senderEmail, senderPassword, item.email, subject, content)
 
+                        val sdfGregorian = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                        val gregorianTime = sdfGregorian.format(Date())
+
                         if (success) {
                             // Delete from DB immediately on success
                             emailQueueDao.deleteById(item.id)
+                            sentReportsList.add(
+                                SentEmailReport(
+                                    sender = senderEmail,
+                                    recipient = item.email,
+                                    subject = subject,
+                                    body = content,
+                                    sentAtGregorian = gregorianTime
+                                )
+                            )
                             withContext(Dispatchers.Main) {
                                 batchSentCount++
                                 addLog("ارسال به ${item.email} با موفقیت انجام شد ✅", true)
@@ -631,16 +647,31 @@ fun SendToEmailsContent(
                         delay(5_000)
                     }
 
+                    // Save Excel Report for this batch immediately
+                    if (sentReportsList.isNotEmpty()) {
+                        withContext(Dispatchers.Main) {
+                            createSentEmailsReportExcel(context, sentReportsList)
+                        }
+                    }
+
                     // Check if we finished the batch successfully and have more pending items
                     val remainingPendingCount = emailQueueDao.getPendingCount()
 
                     withContext(Dispatchers.Main) {
                         isSending = false
+
+                        val summaryMsg = "\n=== خلاصه عملیات بسته $currentBatchNum ===\n" +
+                                         "تعداد کل ارسالی موفق این بسته: $batchSentCount\n" +
+                                         "تعداد ارسالی ناموفق این بسته: $batchFailedCount\n" +
+                                         "کل باقی‌مانده در صف دیتابیس: $remainingPendingCount\n" +
+                                         "=============================="
+                        addLog(summaryMsg, true)
+
                         if (remainingPendingCount > 0) {
                             // Pause and ask for next credentials
                             isBatchPausedForCredentials = true
                             currentBatchNum++
-                            addLog("بسته $currentBatchNum-1 کامل شد. برنامه موقتاً متوقف شد. لطفاً اطلاعات اکانت جدید را وارد کنید و روی 'بعدی' کلیک کنید.", true)
+                            addLog("بسته کامل شد. برنامه موقتاً متوقف شد. لطفاً اطلاعات اکانت جدید را وارد کنید و روی 'بعدی' کلیک کنید.", true)
                             Toast.makeText(context, "بسته کامل شد. لطفاً اطلاعات اکانت بعدی را وارد کنید.", Toast.LENGTH_LONG).show()
                         } else {
                             // Fully finished!
