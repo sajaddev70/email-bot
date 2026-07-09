@@ -1,0 +1,16 @@
+<resources>
+    <string name="app_name">massengerapp</string>
+    <string name="register_title">ثبت‌نام</string>
+    <string name="enter_your_info">لطفاً اطلاعات خود را وارد کنید</string>
+    <string name="phone_number">شماره تلفن</string>
+    <string name="phone_required">شماره تلفن الزامی است</string>
+    <string name="invalid_phone">شماره تلفن معتبر نیست</string>
+    <string name="email">ایمیل</string>
+    <string name="email_required">ایمیل الزامی است</string>
+    <string name="invalid_email">ایمیل معتبر نیست</string>
+    <string name="password">رمز عبور</string>
+    <string name="password_required">رمز عبور الزامی است</string>
+    <string name="password_min_length">رمز عبور باید حداقل ۶ کاراکتر باشد</string>
+    <string name="register_button">ثبت‌نام</string>
+    <string name="register_error">خطا در ثبت‌نام</string>
+</resources>
