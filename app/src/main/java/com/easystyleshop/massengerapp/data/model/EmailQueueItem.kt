@@ -10,6 +10,9 @@ data class EmailQueueItem(
     val email: String,
     val subject: String,
     val content: String,
-    val status: String = "PENDING",
-    val createdAt: Long = System.currentTimeMillis()
+    val status: String = "PENDING", // "PENDING", "SENT", "INVALID_FORMAT", "SMTP_REJECTED"
+    val createdAt: Long = System.currentTimeMillis(),
+    val senderEmail: String? = null,
+    val sentAt: Long? = null,
+    val errorMessage: String? = null
 )

@@ -2,7 +2,9 @@ package com.easystyleshop.massengerapp.ui.screens
 
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.net.Uri
+import android.os.Build
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -32,21 +34,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.easystyleshop.massengerapp.data.local.AppDatabase
 import com.easystyleshop.massengerapp.data.model.EmailQueueItem
-import com.easystyleshop.massengerapp.data.model.SentEmailReport
-import com.easystyleshop.massengerapp.util.createSentEmailsReportExcel
+import com.easystyleshop.massengerapp.service.EmailSendingService
+import com.easystyleshop.massengerapp.util.generateComprehensiveEmailReport
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.apache.poi.ss.usermodel.WorkbookFactory
 import java.text.SimpleDateFormat
 import java.util.*
-
-data class LiveLog(
-    val timestamp: String,
-    val message: String,
-    val isSuccess: Boolean
-)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -56,6 +51,27 @@ fun SendToEmailsContent(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
+    // Dynamically request notification permissions on Android 13+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { isGranted ->
+            if (!isGranted) {
+                Toast.makeText(context, "جهت مشاهده وضعیت ارسال در پس‌زمینه، دسترسی نوتیفیکیشن لازم است.", Toast.LENGTH_LONG).show()
+            }
+        }
+    )
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    // Pass composable-provided onSend logic down to EmailSendingService statically
+    LaunchedEffect(onSend) {
+        EmailSendingService.onSendLambda = onSend
+    }
+
     // Database instance
     val db = remember { AppDatabase.getDatabase(context) }
     val emailQueueDao = db.emailQueueDao()
@@ -63,12 +79,15 @@ fun SendToEmailsContent(
     // Shared preferences for persistent sender configuration
     val sharedPrefs = remember { context.getSharedPreferences("sender_prefs", Context.MODE_PRIVATE) }
 
-    // Sender UI States
+    // Persistent State Variables
     var senderEmail by remember {
         mutableStateOf(sharedPrefs.getString("sender_email", "test.test.dev.1991@gmail.com") ?: "test.test.dev.1991@gmail.com")
     }
     var senderPassword by remember {
         mutableStateOf(sharedPrefs.getString("sender_password", "cgfy nwwj peir orlu") ?: "cgfy nwwj peir orlu")
+    }
+    var delaySecondsStr by remember {
+        mutableStateOf(sharedPrefs.getInt("delay_seconds", 60).toString())
     }
     var passwordVisible by remember { mutableStateOf(false) }
 
@@ -80,70 +99,71 @@ fun SendToEmailsContent(
     var emailError by remember { mutableStateOf(false) }
     var contentError by remember { mutableStateOf(false) }
     
-    // Queue & Send Status
-    val queueList = remember { mutableStateListOf<EmailQueueItem>() }
-    var totalEmailsLoaded by remember { mutableStateOf(0) }
-    var isSending by remember { mutableStateOf(false) }
-    var sourceName by remember { mutableStateOf("فایل اکسل پیش‌فرض (email.xlsx)") }
+    // Auto sync stats from Database using Flows
+    val pendingCount by emailQueueDao.getPendingCountFlow().collectAsState(initial = 0)
+    val sentCount by emailQueueDao.getSentCountFlow().collectAsState(initial = 0)
+    val invalidFormatCount by emailQueueDao.getInvalidFormatCountFlow().collectAsState(initial = 0)
+    val smtpRejectedCount by emailQueueDao.getSmtpRejectedCountFlow().collectAsState(initial = 0)
+    val totalCount = pendingCount + sentCount + invalidFormatCount + smtpRejectedCount
 
-    // Batch Control State
-    var currentBatchNum by remember { mutableStateOf(1) }
-    var batchSentCount by remember { mutableStateOf(0) }
-    var batchFailedCount by remember { mutableStateOf(0) }
-    var isBatchPausedForCredentials by remember { mutableStateOf(false) }
+    // Listen to background service status from SharedPreferences
+    var isBatchPaused by remember { mutableStateOf(sharedPrefs.getBoolean("is_batch_paused", false)) }
+    var isServiceRunning by remember { mutableStateOf(sharedPrefs.getBoolean("is_service_running", false)) }
+    var batchProcessedCount by remember { mutableStateOf(sharedPrefs.getInt("batch_processed_count", 0)) }
 
-    // Live Logs
-    val liveLogs = remember { mutableStateListOf<LiveLog>() }
-    val logsListState = rememberLazyListState()
-
-    // Helper to add live log
-    fun addLog(msg: String, isSuccess: Boolean) {
-        val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-        val currentTime = sdf.format(Date())
-        liveLogs.add(LiveLog(currentTime, msg, isSuccess))
+    DisposableEffect(sharedPrefs) {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
+            when (key) {
+                "is_batch_paused" -> isBatchPaused = prefs.getBoolean("is_batch_paused", false)
+                "is_service_running" -> isServiceRunning = prefs.getBoolean("is_service_running", false)
+                "batch_processed_count" -> batchProcessedCount = prefs.getInt("batch_processed_count", 0)
+            }
+        }
+        sharedPrefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose {
+            sharedPrefs.unregisterOnSharedPreferenceChangeListener(listener)
+        }
     }
 
-    // Helper to fetch latest from DB
-    fun refreshQueue() {
-        scope.launch(Dispatchers.IO) {
-            val pending = emailQueueDao.getAllPending()
-            withContext(Dispatchers.Main) {
-                queueList.clear()
-                queueList.addAll(pending)
-                if (totalEmailsLoaded == 0) {
-                    totalEmailsLoaded = pending.size
+    var sourceName by remember { mutableStateOf("فایل اکسل پیش‌فرض (email.xlsx)") }
+    var showWrongEmailsDialog by remember { mutableStateOf(false) }
+    var wrongEmailsList by remember { mutableStateOf(listOf<EmailQueueItem>()) }
+
+    // Fetch wrong emails for display
+    LaunchedEffect(invalidFormatCount, smtpRejectedCount, showWrongEmailsDialog) {
+        if (showWrongEmailsDialog) {
+            scope.launch(Dispatchers.IO) {
+                val all = emailQueueDao.getAllItems()
+                val wrong = all.filter { it.status == "INVALID_FORMAT" || it.status == "SMTP_REJECTED" }
+                withContext(Dispatchers.Main) {
+                    wrongEmailsList = wrong
                 }
             }
         }
     }
 
-    // Load Initial Queue (either from DB or from Raw Excel)
+    // Load Initial Queue from Raw Excel if DB is empty or has old corrupted imports
     LaunchedEffect(Unit) {
         scope.launch(Dispatchers.IO) {
-            var pendingCount = emailQueueDao.getPendingCount()
-            if (pendingCount == 0) {
-                // DB is empty, parse from raw email.xlsx automatically
-                addLog("در حال بارگذاری خودکار ایمیل‌ها از فایل پیش‌فرض...", true)
+            val allItems = emailQueueDao.getAllItems()
+            val hasCorruptedData = allItems.any { it.email == "ROW" || it.email.toDoubleOrNull() != null }
+            if (allItems.isEmpty() || hasCorruptedData) {
+                emailQueueDao.deleteAll()
+
+                // Reset stats in preferences
+                sharedPrefs.edit()
+                    .putInt("batch_processed_count", 0)
+                    .putBoolean("is_batch_paused", false)
+                    .putLong("sending_start_time", 0L)
+                    .apply()
+
                 val rawEmails = readEmailsFromRawResource(context)
                 if (rawEmails.isNotEmpty()) {
                     val queueItems = rawEmails.map { email ->
                         EmailQueueItem(email = email, subject = subject, content = content)
                     }
                     emailQueueDao.insertAll(queueItems)
-                    pendingCount = emailQueueDao.getPendingCount()
-                    addLog("تعداد $pendingCount ایمیل به طور خودکار بارگذاری و در دیتابیس ذخیره شد.", true)
-                } else {
-                    addLog("فایل پیش‌فرض ایمیل یافت نشد یا خالی است.", false)
                 }
-            } else {
-                addLog("بازیابی $pendingCount ایمیل ارسال‌نشده از دوره قبلی در دیتابیس محلی...", true)
-            }
-
-            val pendingList = emailQueueDao.getAllPending()
-            withContext(Dispatchers.Main) {
-                queueList.clear()
-                queueList.addAll(pendingList)
-                totalEmailsLoaded = pendingList.size
             }
         }
     }
@@ -155,43 +175,35 @@ fun SendToEmailsContent(
             uri?.let {
                 context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 scope.launch(Dispatchers.IO) {
-                    addLog("در حال خواندن فایل اکسل انتخاب شده...", true)
                     val imported = readEmailsFromExcel(context, uri)
                     if (imported.isNotEmpty()) {
                         emailQueueDao.deleteAll() // Clear old queue
+
+                        // Reset stats in preferences
+                        sharedPrefs.edit()
+                            .putInt("batch_processed_count", 0)
+                            .putBoolean("is_batch_paused", false)
+                            .putLong("sending_start_time", 0L)
+                            .apply()
+
                         val queueItems = imported.map { email ->
                             EmailQueueItem(email = email, subject = subject, content = content)
                         }
                         emailQueueDao.insertAll(queueItems)
-                        val pendingList = emailQueueDao.getAllPending()
+
                         withContext(Dispatchers.Main) {
-                            queueList.clear()
-                            queueList.addAll(pendingList)
-                            totalEmailsLoaded = pendingList.size
                             sourceName = "فایل اکسل سفارشی"
-                            currentBatchNum = 1
-                            batchSentCount = 0
-                            batchFailedCount = 0
-                            isBatchPausedForCredentials = false
+                            Toast.makeText(context, "تعداد ${imported.size} ایمیل جدید با موفقیت وارد دیتابیس شد.", Toast.LENGTH_SHORT).show()
                         }
-                        addLog("تعداد ${pendingList.size} ایمیل جدید با موفقیت وارد دیتابیس شد.", true)
                     } else {
                         withContext(Dispatchers.Main) {
                             Toast.makeText(context, "هیچ ایمیل معتبری در فایل پیدا نشد", Toast.LENGTH_LONG).show()
                         }
-                        addLog("فایل انتخابی فاقد آدرس ایمیل معتبر بود.", false)
                     }
                 }
             }
         }
     )
-
-    // Auto scroll logs to bottom when new log added
-    LaunchedEffect(liveLogs.size) {
-        if (liveLogs.isNotEmpty()) {
-            logsListState.animateScrollToItem(liveLogs.size - 1)
-        }
-    }
 
     Column(
         modifier = Modifier
@@ -209,7 +221,7 @@ fun SendToEmailsContent(
         ) {
             Column {
                 Text(
-                    text = "سامانه ارسال ایمیل هوشمند",
+                    text = "سامانه ارسال ایمیل هوشمند (فعال در پس‌زمینه)",
                     style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                     color = MaterialTheme.colorScheme.primary
                 )
@@ -219,16 +231,32 @@ fun SendToEmailsContent(
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
                 )
             }
-            IconButton(
-                onClick = {
-                    excelLauncher.launch(arrayOf("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
-                },
-                colors = IconButtonDefaults.iconButtonColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                )
-            ) {
-                Icon(Icons.Default.AttachFile, contentDescription = "Import Custom Excel")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                IconButton(
+                    onClick = {
+                        scope.launch {
+                            generateComprehensiveEmailReport(context, db)
+                        }
+                    },
+                    colors = IconButtonDefaults.iconButtonColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                ) {
+                    Icon(Icons.Default.Download, contentDescription = "دانلود گزارش اکسل")
+                }
+
+                IconButton(
+                    onClick = {
+                        excelLauncher.launch(arrayOf("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+                    },
+                    colors = IconButtonDefaults.iconButtonColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                ) {
+                    Icon(Icons.Default.AttachFile, contentDescription = "Import Custom Excel")
+                }
             }
         }
 
@@ -238,6 +266,34 @@ fun SendToEmailsContent(
                 .fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            // BATCH LIMIT / SERVICE WARNING BANNER
+            if (isBatchPaused) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(
+                                text = "بسته ۵۰۰ تایی قبلی با موفقیت به پایان رسید یا فرستنده نامعتبر است. جهت ادامه ارسال، لطفا اطلاعات فرستنده جدید را وارد کرده و دکمه 'ادامه ارسال' را بزنید.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        }
+                    }
+                }
+            }
+
             // CARD 1: QUEUE STATUS CARD
             item {
                 Card(
@@ -247,38 +303,49 @@ fun SendToEmailsContent(
                 ) {
                     Column(modifier = Modifier.padding(14.dp)) {
                         Text(
-                            text = "وضعیت صف ارسال ایمیل",
+                            text = "وضعیت صف ارسال ایمیل (همگام‌سازی خودکار)",
                             style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.height(12.dp))
+
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Column {
-                                Text(
-                                    text = "کل ایمیل‌ها:",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
-                                )
-                                Text(
-                                    text = "$totalEmailsLoaded",
-                                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                                    color = MaterialTheme.colorScheme.primary
-                                )
+                                Text("کل ایمیل‌ها:", style = MaterialTheme.typography.bodySmall)
+                                Text("$totalCount", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold), color = MaterialTheme.colorScheme.primary)
                             }
-                            Column(horizontalAlignment = Alignment.End) {
-                                Text(
-                                    text = "ارسال نشده (در صف):",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
-                                )
-                                Text(
-                                    text = "${queueList.size}",
-                                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                                    color = MaterialTheme.colorScheme.error
-                                )
+                            Column {
+                                Text("موفق:", style = MaterialTheme.typography.bodySmall)
+                                Text("$sentCount", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold), color = Color(0xFF2E7D32))
+                            }
+                            Column {
+                                Text("باقی‌مانده:", style = MaterialTheme.typography.bodySmall)
+                                Text("$pendingCount", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold), color = Color(0xFFE65100))
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column {
+                                Text("فرمت اشتباه: $invalidFormatCount", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                                Text("رد شده توسط سرور (SMTP): $smtpRejectedCount", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                            }
+
+                            if (invalidFormatCount + smtpRejectedCount > 0) {
+                                TextButton(onClick = { showWrongEmailsDialog = true }) {
+                                    Text("مشاهده لیست خطاکارها", style = MaterialTheme.typography.labelMedium)
+                                    Icon(Icons.Default.ArrowRight, contentDescription = null)
+                                }
                             }
                         }
                     }
@@ -304,26 +371,19 @@ fun SendToEmailsContent(
                                 style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                                 color = MaterialTheme.colorScheme.onSurface
                             )
-                            if (isSending) {
+                            if (isServiceRunning) {
                                 Badge(
-                                    containerColor = MaterialTheme.colorScheme.errorContainer,
-                                    contentColor = MaterialTheme.colorScheme.onErrorContainer
+                                    containerColor = Color(0xFFE8F5E9),
+                                    contentColor = Color(0xFF2E7D32)
                                 ) {
-                                    Text("قفل شده", modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                                }
-                            } else if (isBatchPausedForCredentials) {
-                                Badge(
-                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                                ) {
-                                    Text("نیاز به اکانت جدید", modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                                    Text("سرویس پس‌زمینه فعال", modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
                                 }
                             } else {
                                 Badge(
                                     containerColor = MaterialTheme.colorScheme.secondaryContainer,
                                     contentColor = MaterialTheme.colorScheme.onSecondaryContainer
                                 ) {
-                                    Text("آماده ورود داده", modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                                    Text("سرویس متوقف", modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
                                 }
                             }
                         }
@@ -336,7 +396,7 @@ fun SendToEmailsContent(
                                 senderEmail = it
                                 emailError = false
                             },
-                            enabled = !isSending,
+                            enabled = !isServiceRunning,
                             label = { Text("ایمیل فرستنده (جیمیل)") },
                             isError = emailError,
                             leadingIcon = { Icon(Icons.Default.Email, contentDescription = null) },
@@ -349,7 +409,7 @@ fun SendToEmailsContent(
                         OutlinedTextField(
                             value = senderPassword,
                             onValueChange = { senderPassword = it },
-                            enabled = !isSending,
+                            enabled = !isServiceRunning,
                             label = { Text("کلمه عبور برنامه (App Password)") },
                             leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null) },
                             trailingIcon = {
@@ -363,6 +423,20 @@ fun SendToEmailsContent(
                             visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
                             modifier = Modifier.fillMaxWidth(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        OutlinedTextField(
+                            value = delaySecondsStr,
+                            onValueChange = {
+                                delaySecondsStr = it
+                            },
+                            enabled = !isServiceRunning,
+                            label = { Text("فاصله زمانی ارسال بین هر ایمیل (ثانیه)") },
+                            leadingIcon = { Icon(Icons.Default.Timer, contentDescription = null) },
+                            modifier = Modifier.fillMaxWidth(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
                         )
                     }
                 }
@@ -386,7 +460,7 @@ fun SendToEmailsContent(
                         OutlinedTextField(
                             value = subject,
                             onValueChange = { subject = it },
-                            enabled = !isSending,
+                            enabled = !isServiceRunning,
                             label = { Text("موضوع ایمیل") },
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -397,7 +471,7 @@ fun SendToEmailsContent(
                                 content = it
                                 contentError = false
                             },
-                            enabled = !isSending,
+                            enabled = !isServiceRunning,
                             label = { Text("محتوای پیام") },
                             isError = contentError,
                             modifier = Modifier
@@ -419,43 +493,31 @@ fun SendToEmailsContent(
                 ) {
                     Column(modifier = Modifier.padding(14.dp)) {
                         Text(
-                            text = "وضعیت پیشرفت ارسال (بسته‌های ۵۰۰ تایی)",
+                            text = "وضعیت پیشرفت ارسال بسته ۵۰۰ تایی",
                             style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                             color = MaterialTheme.colorScheme.onSurface
                         )
 
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        // Current batch and counters
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
-                                text = "بسته فعلی: شماره $currentBatchNum",
+                                text = "پیشرفت بسته جاری: $batchProcessedCount از ۵۰۰",
                                 style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
                                 color = MaterialTheme.colorScheme.primary
-                            )
-                            Text(
-                                text = "موفق: $batchSentCount | ناموفق: $batchFailedCount",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
                             )
                         }
 
                         Spacer(modifier = Modifier.height(8.dp))
 
-                        // Progress Calculation
-                        val processedInBatch = batchSentCount + batchFailedCount
-                        val progressFraction = if (totalEmailsLoaded > 0) {
-                            (totalEmailsLoaded - queueList.size).toFloat() / totalEmailsLoaded.toFloat()
-                        } else {
-                            0f
-                        }
-                        val percentage = (progressFraction * 100).toInt()
+                        val progressFraction = batchProcessedCount.toFloat() / 500f
+                        val percentage = (progressFraction * 100).toInt().coerceIn(0, 100)
 
                         LinearProgressIndicator(
-                            progress = { progressFraction },
+                            progress = { progressFraction.coerceIn(0f, 1f) },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(8.dp)
@@ -471,73 +533,15 @@ fun SendToEmailsContent(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
-                                text = "پیشرفت کل: $percentage%",
+                                text = "پیشرفت کل بسته: $percentage%",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                             )
                             Text(
-                                text = "باقی‌مانده کل: ${queueList.size} ایمیل",
+                                text = "تعداد باقی‌مانده کل صف: $pendingCount ایمیل",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                             )
-                        }
-                    }
-                }
-            }
-
-            // CARD 5: LIVE LOGS CARD
-            item {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(200.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E)),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Column(modifier = Modifier.padding(10.dp)) {
-                        Text(
-                            text = "گزارش زنده ارسال (کنسول)",
-                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
-                            color = Color.LightGray,
-                            modifier = Modifier.padding(bottom = 6.dp)
-                        )
-                        HorizontalDivider(color = Color.DarkGray, modifier = Modifier.padding(bottom = 6.dp))
-
-                        if (liveLogs.isEmpty()) {
-                            Box(
-                                modifier = Modifier.fillMaxSize(),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "هیچ فعالیتی ثبت نشده است",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color.Gray
-                                )
-                            }
-                        } else {
-                            LazyColumn(
-                                state = logsListState,
-                                modifier = Modifier.fillMaxSize()
-                            ) {
-                                items(liveLogs) { log ->
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 2.dp)
-                                    ) {
-                                        Text(
-                                            text = "[${log.timestamp}] ",
-                                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
-                                            color = Color.Cyan
-                                        )
-                                        Text(
-                                            text = log.message,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = if (log.isSuccess) Color.Green else Color.Red
-                                        )
-                                    }
-                                }
-                            }
                         }
                     }
                 }
@@ -549,182 +553,82 @@ fun SendToEmailsContent(
         // BOTTOM ACTION BUTTON
         Button(
             onClick = {
-                if (isSending) return@Button
-
-                // Validate credentials
-                if (senderEmail.isBlank() || !android.util.Patterns.EMAIL_ADDRESS.matcher(senderEmail).matches()) {
-                    emailError = true
-                    Toast.makeText(context, "لطفاً یک ایمیل فرستنده معتبر وارد کنید", Toast.LENGTH_SHORT).show()
-                    return@Button
-                }
-
-                if (senderPassword.isBlank()) {
-                    Toast.makeText(context, "لطفاً کلمه عبور فرستنده را وارد کنید", Toast.LENGTH_SHORT).show()
-                    return@Button
-                }
-
-                if (content.isBlank()) {
-                    contentError = true
-                    Toast.makeText(context, "محتوای ایمیل نباید خالی باشد", Toast.LENGTH_SHORT).show()
-                    return@Button
-                }
-
-                // Save credentials to SharedPrefs securely
-                sharedPrefs.edit()
-                    .putString("sender_email", senderEmail)
-                    .putString("sender_password", senderPassword)
-                    .apply()
-
-                // Start sending current batch of up to 500 emails
-                isSending = true
-                isBatchPausedForCredentials = false
-
-                scope.launch(Dispatchers.IO) {
-                    val pendingEmails = emailQueueDao.getAllPending()
-                    if (pendingEmails.isEmpty()) {
-                        withContext(Dispatchers.Main) {
-                            isSending = false
-                            Toast.makeText(context, "هیچ ایمیلی در صف ارسال وجود ندارد", Toast.LENGTH_SHORT).show()
-                        }
-                        return@launch
+                if (isServiceRunning) {
+                    // Stop service
+                    val stopIntent = Intent(context, EmailSendingService::class.java).apply {
+                        action = EmailSendingService.ACTION_STOP
+                    }
+                    context.startService(stopIntent)
+                    Toast.makeText(context, "سرویس ارسال متوقف شد", Toast.LENGTH_SHORT).show()
+                } else {
+                    // Start or resume service
+                    if (senderEmail.isBlank() || !android.util.Patterns.EMAIL_ADDRESS.matcher(senderEmail).matches()) {
+                        emailError = true
+                        Toast.makeText(context, "لطفاً یک ایمیل فرستنده معتبر وارد کنید", Toast.LENGTH_SHORT).show()
+                        return@Button
                     }
 
-                    // Batching configuration
-                    val currentBatchList = pendingEmails.take(500)
-                    withContext(Dispatchers.Main) {
-                        batchSentCount = 0
-                        batchFailedCount = 0
-                        addLog("شروع ارسال بسته شماره $currentBatchNum شامل ${currentBatchList.size} ایمیل...", true)
+                    if (senderPassword.isBlank()) {
+                        Toast.makeText(context, "لطفاً کلمه عبور فرستنده را وارد کنید", Toast.LENGTH_SHORT).show()
+                        return@Button
                     }
 
-                    val sentReportsList = mutableListOf<SentEmailReport>()
+                    val delaySec = delaySecondsStr.toIntOrNull() ?: 60
 
-                    for (item in currentBatchList) {
-                        if (!isSending) break // Safe cancellation
+                    // Save values
+                    sharedPrefs.edit()
+                        .putString("sender_email", senderEmail)
+                        .putString("sender_password", senderPassword)
+                        .putInt("delay_seconds", delaySec)
+                        .apply()
 
-                        withContext(Dispatchers.Main) {
-                            addLog("درحال ارسال ایمیل به ${item.email}...", true)
+                    // If batch was paused, reset it when user chooses to resume with new credentials
+                    if (isBatchPaused) {
+                        sharedPrefs.edit()
+                            .putInt("batch_processed_count", 0)
+                            .putBoolean("is_batch_paused", false)
+                            .apply()
+                    }
+
+                    // Bulk update subject and content of remaining pending emails in DB
+                    scope.launch(Dispatchers.IO) {
+                        val pending = emailQueueDao.getAllPending()
+                        if (pending.isNotEmpty()) {
+                            val updated = pending.map { it.copy(subject = subject, content = content) }
+                            emailQueueDao.insertAll(updated)
                         }
 
-                        // Send call
-                        var success = false
-                        var isWebLoginRequired = false
-                        try {
-                            success = onSend(senderEmail, senderPassword, item.email, subject, content)
-                        } catch (e: Exception) {
-                            if (e is javax.mail.AuthenticationFailedException || e.message?.contains("WebLoginRequired") == true) {
-                                isWebLoginRequired = true
+                        withContext(Dispatchers.Main) {
+                            val startIntent = Intent(context, EmailSendingService::class.java).apply {
+                                action = EmailSendingService.ACTION_START
                             }
-                        }
-
-                        val sdfGregorian = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-                        val gregorianTime = sdfGregorian.format(Date())
-
-                        if (success) {
-                            // Delete from DB immediately on success
-                            emailQueueDao.deleteById(item.id)
-                            sentReportsList.add(
-                                SentEmailReport(
-                                    sender = senderEmail,
-                                    recipient = item.email,
-                                    subject = subject,
-                                    body = content,
-                                    sentAtGregorian = gregorianTime
-                                )
-                            )
-                            withContext(Dispatchers.Main) {
-                                batchSentCount++
-                                addLog("ارسال به ${item.email} با موفقیت انجام شد ✅", true)
-                            }
-                        } else {
-                            // Retain in DB on failure
-                            withContext(Dispatchers.Main) {
-                                batchFailedCount++
-                                addLog("خطا در ارسال ایمیل به ${item.email} ❌", false)
-                                if (isWebLoginRequired) {
-                                    val helpMsg = "⚠️ خطای امنیتی گوگل (WebLoginRequired) رخ داد!\n" +
-                                                  "گوگل اتصال مستقیم را مسدود کرده است.\n" +
-                                                  "علت: پسورد وارد شده کلمه عبور عادی شماست، یا پسورد اشتباه است.\n" +
-                                                  "راه‌حل:\n" +
-                                                  "۱. مطمئن شوید تایید دو مرحله‌ای (2-Step Verification) در جیمیل شما فعال است.\n" +
-                                                  "۲. یک پسورد برنامه ۱۶ رقمی مخصوص (App Password) بسازید و استفاده کنید.\n" +
-                                                  "۳. بررسی کنید کلمه عبور را درست وارد کرده باشید."
-                                    addLog(helpMsg, false)
-                                }
-                            }
-                        }
-
-                        // Refresh local Compose queue list to update UI count
-                        val updatedPending = emailQueueDao.getAllPending()
-                        withContext(Dispatchers.Main) {
-                            queueList.clear()
-                            queueList.addAll(updatedPending)
-                        }
-
-                        // Required 30 seconds delay between each email
-                        delay(100_000)
-                    }
-
-                    // Save Excel Report for this batch immediately
-                    if (sentReportsList.isNotEmpty()) {
-                        withContext(Dispatchers.Main) {
-                            createSentEmailsReportExcel(context, sentReportsList)
-                        }
-                    }
-
-                    // Check if we finished the batch successfully and have more pending items
-                    val remainingPendingCount = emailQueueDao.getPendingCount()
-
-                    withContext(Dispatchers.Main) {
-                        isSending = false
-
-                        val summaryMsg = "\n=== خلاصه عملیات بسته $currentBatchNum ===\n" +
-                                         "تعداد کل ارسالی موفق این بسته: $batchSentCount\n" +
-                                         "تعداد ارسالی ناموفق این بسته: $batchFailedCount\n" +
-                                         "کل باقی‌مانده در صف دیتابیس: $remainingPendingCount\n" +
-                                         "=============================="
-                        addLog(summaryMsg, true)
-
-                        if (remainingPendingCount > 0) {
-                            // Pause and ask for next credentials
-                            isBatchPausedForCredentials = true
-                            currentBatchNum++
-                            addLog("بسته کامل شد. برنامه موقتاً متوقف شد. لطفاً اطلاعات اکانت جدید را وارد کنید و روی 'بعدی' کلیک کنید.", true)
-                            Toast.makeText(context, "بسته کامل شد. لطفاً اطلاعات اکانت بعدی را وارد کنید.", Toast.LENGTH_LONG).show()
-                        } else {
-                            // Fully finished!
-                            currentBatchNum = 1
-                            addLog("ارسال تمامی ایمیل‌های موجود در صف با موفقیت به پایان رسید! 🎉", true)
-                            Toast.makeText(context, "ارسال تمامی ایمیل‌ها به پایان رسید", Toast.LENGTH_LONG).show()
+                            context.startForegroundService(startIntent)
+                            Toast.makeText(context, "سرویس ارسال پس‌زمینه راه‌اندازی شد", Toast.LENGTH_SHORT).show()
                         }
                     }
                 }
             },
-            enabled = !isSending && queueList.isNotEmpty(),
+            enabled = pendingCount > 0 || isServiceRunning,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(56.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = if (isBatchPausedForCredentials) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                containerColor = if (isServiceRunning) MaterialTheme.colorScheme.error else if (isBatchPaused) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
             ),
             shape = RoundedCornerShape(12.dp)
         ) {
-            if (isSending) {
-                CircularProgressIndicator(
-                    color = Color.White,
-                    modifier = Modifier.size(24.dp),
-                    strokeWidth = 2.dp
-                )
-                Spacer(modifier = Modifier.width(12.dp))
-                Text("در حال ارسال ایمیل‌ها...", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            if (isServiceRunning) {
+                Icon(Icons.Default.Pause, contentDescription = null)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("توقف ارسال ایمیل‌ها", fontSize = 16.sp, fontWeight = FontWeight.Bold)
             } else {
-                val buttonText = if (isBatchPausedForCredentials) {
-                    "بعدی (ارسال بسته $currentBatchNum)"
+                val buttonText = if (isBatchPaused) {
+                    "بعدی (ادامه ارسال بسته ۵۰۰ تایی)"
                 } else {
-                    "شروع ارسال ایمیل‌ها"
+                    "شروع ارسال ایمیل‌ها در پس‌زمینه"
                 }
                 Icon(
-                    imageVector = if (isBatchPausedForCredentials) Icons.Default.SkipNext else Icons.Default.PlayArrow,
+                    imageVector = if (isBatchPaused) Icons.Default.SkipNext else Icons.Default.PlayArrow,
                     contentDescription = null
                 )
                 Spacer(modifier = Modifier.width(8.dp))
@@ -732,22 +636,62 @@ fun SendToEmailsContent(
             }
         }
     }
+
+    // Wrong emails list AlertDialog
+    if (showWrongEmailsDialog) {
+        AlertDialog(
+            onDismissRequest = { showWrongEmailsDialog = false },
+            title = { Text("لیست ایمیل‌های اشتباه و ریجکت شده") },
+            text = {
+                Box(modifier = Modifier.height(300.dp).fillMaxWidth()) {
+                    if (wrongEmailsList.isEmpty()) {
+                        Text("هیچ ایمیل خطاداری ثبت نشده است.")
+                    } else {
+                        LazyColumn(
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            items(wrongEmailsList) { item ->
+                                val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+                                val timeStr = if (item.sentAt != null) sdf.format(Date(item.sentAt)) else "-"
+                                Card(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f))
+                                ) {
+                                    Column(modifier = Modifier.padding(10.dp)) {
+                                        Text("آدرس: ${item.email}", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                        Text("نوع خطا: ${if (item.status == "INVALID_FORMAT") "فرمت نامعتبر" else "ریجکت سرور (SMTP)"}", fontSize = 12.sp)
+                                        Text("علت: ${item.errorMessage ?: "نامشخص"}", fontSize = 11.sp, color = Color.Red)
+                                        Text("زمان تلاش: $timeStr | فرستنده: ${item.senderEmail ?: "-"}", fontSize = 11.sp)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = { showWrongEmailsDialog = false }) {
+                    Text("بستن")
+                }
+            }
+        )
+    }
 }
 
-// Read emails helper from raw resources (scans all cells in all rows to find emails)
+// Read emails helper from raw resources (targets Column B index 1 and skips row 0 header)
 fun readEmailsFromRawResource(context: Context): List<String> {
     val emails = mutableListOf<String>()
     try {
         context.resources.openRawResource(com.easystyleshop.massengerapp.R.raw.email).use { inputStream ->
             val workbook = WorkbookFactory.create(inputStream)
             val sheet = workbook.getSheetAt(0)
-            for (row in sheet) {
-                for (cell in row) {
-                    val value = cell?.toString()?.trim()
-                    if (!value.isNullOrBlank() && android.util.Patterns.EMAIL_ADDRESS.matcher(value).matches()) {
-                        emails.add(value)
-                        break // Move to the next row once an email is found in this row
-                    }
+            for (rowNum in 1..sheet.lastRowNum) {
+                val row = sheet.getRow(rowNum) ?: continue
+                val cell = row.getCell(1) // Column B (index 1)
+                val value = cell?.toString()?.trim()
+                if (!value.isNullOrBlank()) {
+                    emails.add(value)
                 }
             }
             workbook.close()
@@ -758,20 +702,19 @@ fun readEmailsFromRawResource(context: Context): List<String> {
     return emails
 }
 
-// Read emails from URI helper (scans all cells in all rows to find emails)
+// Read emails from URI helper (targets Column B index 1 and skips row 0 header)
 fun readEmailsFromExcel(context: Context, uri: Uri): List<String> {
     val emails = mutableListOf<String>()
     try {
         context.contentResolver.openInputStream(uri)?.use { inputStream ->
             val workbook = WorkbookFactory.create(inputStream)
             val sheet = workbook.getSheetAt(0)
-            for (row in sheet) {
-                for (cell in row) {
-                    val value = cell?.toString()?.trim()
-                    if (!value.isNullOrBlank() && android.util.Patterns.EMAIL_ADDRESS.matcher(value).matches()) {
-                        emails.add(value)
-                        break // Move to the next row once an email is found in this row
-                    }
+            for (rowNum in 1..sheet.lastRowNum) {
+                val row = sheet.getRow(rowNum) ?: continue
+                val cell = row.getCell(1) // Column B (index 1)
+                val value = cell?.toString()?.trim()
+                if (!value.isNullOrBlank()) {
+                    emails.add(value)
                 }
             }
             workbook.close()
