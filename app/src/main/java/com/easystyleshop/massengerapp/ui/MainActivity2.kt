@@ -59,9 +59,10 @@ class MainActivity2 : ComponentActivity() {
                                             setSubject(subject)
                                             setText(content)
                                         }
+                                        mimeMessage.saveChanges()
 
                                         val transport = session.getTransport("smtp")
-                                        transport.connect()
+                                        transport.connect("smtp.gmail.com", senderEmail, senderPassword)
                                         transport.sendMessage(mimeMessage, mimeMessage.allRecipients)
                                         transport.close()
                                         Log.d("MainActivity2", "Email sent successfully via SSL (465) to: $email")
@@ -94,9 +95,10 @@ class MainActivity2 : ComponentActivity() {
                                                 setSubject(subject)
                                                 setText(content)
                                             }
+                                            mimeMessage.saveChanges()
 
                                             val transport = session.getTransport("smtp")
-                                            transport.connect()
+                                            transport.connect("smtp.gmail.com", senderEmail, senderPassword)
                                             transport.sendMessage(mimeMessage, mimeMessage.allRecipients)
                                             transport.close()
                                             Log.d("MainActivity2", "Email sent successfully via STARTTLS (587) to: $email")
