@@ -101,10 +101,10 @@ fun ProfileScreen(
                             )
                         }
                         "sendToEmails" -> SendToEmailsContent(
-                            onSend = { email, subject, content ->
-                                messageViewModel.sendMessage(token, email, subject, content,state.data?.phoneNumber ?: "نامشخص")
-                            },
-                            isLoading = messageViewModel.isSendingMessage.collectAsState().value
+                            onSend = { senderEmail, senderPassword, email, subject, content ->
+                                messageViewModel.sendMessage(token, email, subject, content, state.data?.phoneNumber ?: "نامشخص")
+                                true
+                            }
                         )
                     }
                 }
@@ -113,7 +113,3 @@ fun ProfileScreen(
         }
     }
 }
-
-
-
-
