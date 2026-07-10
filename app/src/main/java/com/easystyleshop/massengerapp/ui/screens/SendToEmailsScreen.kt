@@ -50,6 +50,11 @@ fun SendToEmailsContent(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
+    // Pass composable-provided onSend logic down to EmailSendingService statically
+    LaunchedEffect(onSend) {
+        EmailSendingService.onSendLambda = onSend
+    }
+
     // Database instance
     val db = remember { AppDatabase.getDatabase(context) }
     val emailQueueDao = db.emailQueueDao()
@@ -120,11 +125,21 @@ fun SendToEmailsContent(
         }
     }
 
-    // Load Initial Queue from Raw Excel if DB is fully empty
+    // Load Initial Queue from Raw Excel if DB is empty or has old corrupted imports
     LaunchedEffect(Unit) {
         scope.launch(Dispatchers.IO) {
-            val totalExisting = emailQueueDao.getAllItems().size
-            if (totalExisting == 0) {
+            val allItems = emailQueueDao.getAllItems()
+            val hasCorruptedData = allItems.any { it.email == "ROW" || it.email.toDoubleOrNull() != null }
+            if (allItems.isEmpty() || hasCorruptedData) {
+                emailQueueDao.deleteAll()
+
+                // Reset stats in preferences
+                sharedPrefs.edit()
+                    .putInt("batch_processed_count", 0)
+                    .putBoolean("is_batch_paused", false)
+                    .putLong("sending_start_time", 0L)
+                    .apply()
+
                 val rawEmails = readEmailsFromRawResource(context)
                 if (rawEmails.isNotEmpty()) {
                     val queueItems = rawEmails.map { email ->

@@ -39,6 +39,9 @@ class EmailSendingService : Service() {
     companion object {
         const val ACTION_START = "com.easystyleshop.massengerapp.action.START"
         const val ACTION_STOP = "com.easystyleshop.massengerapp.action.STOP"
+
+        // Static lambda reference to invoke the composable-provided onSend logic
+        var onSendLambda: (suspend (senderEmail: String, senderPassword: String, recipientEmail: String, subject: String, content: String) -> Boolean)? = null
     }
 
     override fun onCreate() {
@@ -148,10 +151,15 @@ class EmailSendingService : Service() {
                         continue
                     }
 
-                    // 2. SMTP Sending
+                    // 2. SMTP Sending (Using composable-provided onSend lambda or local SMTP fallback)
                     var isSuccess = false
                     try {
-                        isSuccess = sendEmailSmtp(senderEmail, senderPassword, item.email, item.subject, item.content)
+                        val senderLambda = onSendLambda
+                        if (senderLambda != null) {
+                            isSuccess = senderLambda(senderEmail, senderPassword, item.email, item.subject, item.content)
+                        } else {
+                            isSuccess = sendEmailSmtp(senderEmail, senderPassword, item.email, item.subject, item.content)
+                        }
                     } catch (e: Exception) {
                         val errMsg = e.message ?: ""
                         Log.e("EmailSendingService", "Error sending to ${item.email}: $errMsg", e)
