@@ -289,22 +289,31 @@ suspend fun generateComprehensiveEmailReport(context: Context, db: AppDatabase) 
 
             val workbook = XSSFWorkbook()
 
-            // SHEET 1: Summary
-            val summarySheet = workbook.createSheet("خلاصه گزارش")
+            // SHEET 1: Summary (جمع‌بندی و گزارش خلاصه جهت ارائه به کارفرما)
+            val summarySheet = workbook.createSheet("جمع‌بندی و خلاصه گزارش")
 
-            // Set title
+            // Set main title
             val r0 = summarySheet.createRow(0)
-            r0.createCell(0).setCellValue("گزارش جامع وضعیت سامانه ارسال ایمیل")
+            r0.createCell(0).setCellValue("گزارش جامع وضعیت سامانه ارسال ایمیل (تاییدیه کارفرما)")
 
-            // Statistics Rows
+            // Key Statistics Rows
+            val totalProcessed = allItems.count { it.status != "PENDING" }
+            val totalSuccess = allItems.count { it.status == "SENT" }
+            val totalFailed = allItems.count { it.status == "INVALID_FORMAT" || it.status == "SMTP_REJECTED" }
+            val totalInvalidFormat = allItems.count { it.status == "INVALID_FORMAT" }
+            val totalSmtpRejected = allItems.count { it.status == "SMTP_REJECTED" }
+            val totalRemaining = allItems.count { it.status == "PENDING" }
+
             val stats = listOf(
-                "کل آدرس‌های ایمیل وارد شده" to allItems.size,
-                "تعداد ارسال موفق" to allItems.count { it.status == "SENT" },
-                "تعداد باقی‌مانده در صف" to allItems.count { it.status == "PENDING" },
-                "تعداد ایمیل‌های با فرمت اشتباه" to allItems.count { it.status == "INVALID_FORMAT" },
-                "تعداد ریجکت شده توسط سرور (SMTP)" to allItems.count { it.status == "SMTP_REJECTED" },
-                "تاریخ شروع عملیات ارسال" to startTimeStr,
-                "آخرین زمان همگام‌سازی (Sync)" to syncTimeStr
+                "تعداد کل آدرس‌های وارد شده در صف" to allItems.size,
+                "کل ایمیل‌های پردازش شده در این دوره" to totalProcessed,
+                "تعداد ارسال موفق (ارسال شده)" to totalSuccess,
+                "تعداد کل ایمیل‌های ناموفق (فیلد شده)" to totalFailed,
+                "تعداد خطا به دلیل فرمت آدرس نامعتبر" to totalInvalidFormat,
+                "تعداد خطا به دلیل رد توسط سرور (SMTP)" to totalSmtpRejected,
+                "تعداد کل باقی‌مانده در صف (باقی‌مانده)" to totalRemaining,
+                "تاریخ و زمان شروع عملیات ارسال" to startTimeStr,
+                "آخرین زمان همگام‌سازی و خروجی گزارش" to syncTimeStr
             )
 
             stats.forEachIndexed { idx, pair ->
@@ -313,57 +322,84 @@ suspend fun generateComprehensiveEmailReport(context: Context, db: AppDatabase) 
                 r.createCell(1).setCellValue(pair.second.toString())
             }
 
-            // Sender stats title
-            val rSenderTitle = summarySheet.createRow(stats.size + 4)
+            // Failure breakdown title
+            val rFailTitleRow = stats.size + 4
+            val rFailTitle = summarySheet.createRow(rFailTitleRow)
+            rFailTitle.createCell(0).setCellValue("تحلیل دقیق دلایل عدم ارسال (خطاها/فیلد شده)")
+
+            val rFailHeader = summarySheet.createRow(rFailTitleRow + 1)
+            rFailHeader.createCell(0).setCellValue("دلیل خطا / توضیحات سیستم")
+            rFailHeader.createCell(1).setCellValue("تعداد دفعات رخ‌داد")
+
+            val failuresGrouped = allItems
+                .filter { it.status == "INVALID_FORMAT" || it.status == "SMTP_REJECTED" }
+                .groupBy { it.errorMessage ?: "خطای ناشناخته در زمان ارسال" }
+                .map { it.key to it.value.size }
+
+            if (failuresGrouped.isEmpty()) {
+                val r = summarySheet.createRow(rFailTitleRow + 2)
+                r.createCell(0).setCellValue("هیچ خطایی در این دوره ثبت نشده است. عملکرد ۱۰۰٪ موفق!")
+                r.createCell(1).setCellValue(0.0)
+            } else {
+                failuresGrouped.forEachIndexed { idx, pair ->
+                    val r = summarySheet.createRow(rFailTitleRow + 2 + idx)
+                    r.createCell(0).setCellValue(pair.first)
+                    r.createCell(1).setCellValue(pair.second.toDouble())
+                }
+            }
+
+            // Sender statistics title
+            val rSenderTitleRow = rFailTitleRow + 4 + (if (failuresGrouped.isEmpty()) 1 else failuresGrouped.size)
+            val rSenderTitle = summarySheet.createRow(rSenderTitleRow)
             rSenderTitle.createCell(0).setCellValue("آمار عملکرد اکانت‌های فرستنده")
 
-            val rSenderHeader = summarySheet.createRow(stats.size + 5)
-            rSenderHeader.createCell(0).setCellValue("اکانت فرستنده")
-            rSenderHeader.createCell(1).setCellValue("تعداد ارسال موفق")
+            val rSenderHeader = summarySheet.createRow(rSenderTitleRow + 1)
+            rSenderHeader.createCell(0).setCellValue("اکانت فرستنده ایمیل")
+            rSenderHeader.createCell(1).setCellValue("تعداد ارسال‌های موفق")
 
-            senderStats.forEachIndexed { idx, stat ->
-                val r = summarySheet.createRow(stats.size + 6 + idx)
-                r.createCell(0).setCellValue(stat.senderEmail)
-                r.createCell(1).setCellValue(stat.count.toDouble())
+            if (senderStats.isEmpty()) {
+                val r = summarySheet.createRow(rSenderTitleRow + 2)
+                r.createCell(0).setCellValue("هیچ ارسالی ثبت نشده است.")
+                r.createCell(1).setCellValue(0.0)
+            } else {
+                senderStats.forEachIndexed { idx, stat ->
+                    val r = summarySheet.createRow(rSenderTitleRow + 2 + idx)
+                    r.createCell(0).setCellValue(stat.senderEmail)
+                    r.createCell(1).setCellValue(stat.count.toDouble())
+                }
             }
 
 
-            // SHEET 2: Errors & Invalid format
-            val errorSheet = workbook.createSheet("ایمیل‌های اشتباه و خطاها")
-            val rErrorHeader = errorSheet.createRow(0)
-            rErrorHeader.createCell(0).setCellValue("آدرس ایمیل")
-            rErrorHeader.createCell(1).setCellValue("نوع خطا")
-            rErrorHeader.createCell(2).setCellValue("علت خطا")
-            rErrorHeader.createCell(3).setCellValue("زمان تلاش")
-            rErrorHeader.createCell(4).setCellValue("اکانت فرستنده")
+            // SHEET 2: Detailed sending log (جزئیات وضعیت تک‌تک ایمیل‌ها)
+            val detailSheet = workbook.createSheet("جزئیات ارسال تک‌تک ایمیل‌ها")
+            val rDetailHeader = detailSheet.createRow(0)
+            rDetailHeader.createCell(0).setCellValue("ردیف")
+            rDetailHeader.createCell(1).setCellValue("ایمیل فرستنده")
+            rDetailHeader.createCell(2).setCellValue("ایمیل گیرنده")
+            rDetailHeader.createCell(3).setCellValue("موضوع ایمیل")
+            rDetailHeader.createCell(4).setCellValue("متن پیام ارسال شده")
+            rDetailHeader.createCell(5).setCellValue("زمان دقیق ارسال/تلاش (با ثانیه)")
+            rDetailHeader.createCell(6).setCellValue("وضعیت نهایی")
+            rDetailHeader.createCell(7).setCellValue("علت خطا / توضیحات تکمیلی")
 
-            val errorItems = allItems.filter { it.status == "INVALID_FORMAT" || it.status == "SMTP_REJECTED" }
-            errorItems.forEachIndexed { idx, item ->
-                val r = errorSheet.createRow(idx + 1)
-                r.createCell(0).setCellValue(item.email)
-                val errorType = if (item.status == "INVALID_FORMAT") "فرمت نامعتبر" else "رد شده توسط سرور (SMTP)"
-                r.createCell(1).setCellValue(errorType)
-                r.createCell(2).setCellValue(item.errorMessage ?: "نامشخص")
-                r.createCell(3).setCellValue(if (item.sentAt != null) sdf.format(Date(item.sentAt)) else "-")
-                r.createCell(4).setCellValue(item.senderEmail ?: "-")
-            }
+            allItems.forEachIndexed { idx, item ->
+                val r = detailSheet.createRow(idx + 1)
+                r.createCell(0).setCellValue((idx + 1).toDouble())
+                r.createCell(1).setCellValue(item.senderEmail ?: "-")
+                r.createCell(2).setCellValue(item.email)
+                r.createCell(3).setCellValue(item.subject)
+                r.createCell(4).setCellValue(item.content)
+                r.createCell(5).setCellValue(if (item.sentAt != null) sdf.format(Date(item.sentAt)) else "-")
 
-
-            // SHEET 3: Sent emails
-            val sentSheet = workbook.createSheet("ایمیل‌های موفق")
-            val rSentHeader = sentSheet.createRow(0)
-            rSentHeader.createCell(0).setCellValue("آدرس ایمیل")
-            rSentHeader.createCell(1).setCellValue("موضوع ایمیل")
-            rSentHeader.createCell(2).setCellValue("اکانت فرستنده")
-            rSentHeader.createCell(3).setCellValue("زمان ارسال")
-
-            val sentItems = allItems.filter { it.status == "SENT" }
-            sentItems.forEachIndexed { idx, item ->
-                val r = sentSheet.createRow(idx + 1)
-                r.createCell(0).setCellValue(item.email)
-                r.createCell(1).setCellValue(item.subject)
-                r.createCell(2).setCellValue(item.senderEmail ?: "-")
-                r.createCell(3).setCellValue(if (item.sentAt != null) sdf.format(Date(item.sentAt)) else "-")
+                val statusText = when (item.status) {
+                    "SENT" -> "موفق ✅"
+                    "PENDING" -> "در صف ارسال ⏳"
+                    "INVALID_FORMAT" -> "ناموفق ❌ (فرمت اشتباه)"
+                    "SMTP_REJECTED" -> "ناموفق ❌ (ریجکت سرور)"
+                    else -> "نامشخص"
+                }
+                r.createCell(6).setCellValue(statusText)
+                r.createCell(7).setCellValue(item.errorMessage ?: "")
             }
 
             val filename = "comprehensive_email_report_${System.currentTimeMillis()}.xlsx"
