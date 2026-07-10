@@ -65,7 +65,7 @@ fun SendToEmailsContent(
         mutableStateOf(sharedPrefs.getString("sender_password", "cgfy nwwj peir orlu") ?: "cgfy nwwj peir orlu")
     }
     var delaySecondsStr by remember {
-        mutableStateOf(sharedPrefs.getInt("delay_seconds", 30).toString())
+        mutableStateOf(sharedPrefs.getInt("delay_seconds", 60).toString())
     }
     var passwordVisible by remember { mutableStateOf(false) }
 
@@ -541,7 +541,7 @@ fun SendToEmailsContent(
                         return@Button
                     }
 
-                    val delaySec = delaySecondsStr.toIntOrNull() ?: 30
+                    val delaySec = delaySecondsStr.toIntOrNull() ?: 60
 
                     // Save values
                     sharedPrefs.edit()

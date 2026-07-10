@@ -86,7 +86,7 @@ class EmailSendingService : Service() {
                 while (isActive) {
                     val senderEmail = sharedPrefs.getString("sender_email", "") ?: ""
                     val senderPassword = sharedPrefs.getString("sender_password", "") ?: ""
-                    val delaySeconds = sharedPrefs.getInt("delay_seconds", 30)
+                    val delaySeconds = sharedPrefs.getInt("delay_seconds", 60)
 
                     if (senderEmail.isBlank() || senderPassword.isBlank()) {
                         updateNotification("خطا در تنظیمات", "ایمیل یا کلمه عبور فرستنده وارد نشده است.")
