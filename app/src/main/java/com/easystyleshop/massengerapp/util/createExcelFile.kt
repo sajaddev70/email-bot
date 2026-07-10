@@ -1,4 +1,5 @@
 package com.easystyleshop.massengerapp.util
+
 import android.content.ContentValues
 import android.content.Context
 import android.os.Build
@@ -6,6 +7,7 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Toast
 import androidx.annotation.RequiresApi
+import com.easystyleshop.massengerapp.data.local.AppDatabase
 import com.easystyleshop.massengerapp.data.model.Email
 import com.easystyleshop.massengerapp.data.model.FormModel
 import com.easystyleshop.massengerapp.data.model.TelegramUser
@@ -14,6 +16,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.apache.poi.xssf.usermodel.XSSFWorkbook
 import java.io.OutputStream
+import java.text.SimpleDateFormat
+import java.util.*
 
 fun createExcelFile(context: Context, emails: List<Email>) {
     val workbook = XSSFWorkbook()
@@ -267,5 +271,136 @@ fun createSentEmailsReportExcel(context: Context, reports: List<SentEmailReport>
         }
     } else {
         Toast.makeText(context, "ایجاد فایل گزارش ممکن نبود ❌", Toast.LENGTH_SHORT).show()
+    }
+}
+
+suspend fun generateComprehensiveEmailReport(context: Context, db: AppDatabase) {
+    withContext(Dispatchers.IO) {
+        try {
+            val allItems = db.emailQueueDao().getAllItems()
+            val senderStats = db.emailQueueDao().getSenderStats()
+
+            val sharedPrefs = context.getSharedPreferences("sender_prefs", Context.MODE_PRIVATE)
+            val startTimeLong = sharedPrefs.getLong("sending_start_time", 0L)
+
+            val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+            val startTimeStr = if (startTimeLong != 0L) sdf.format(Date(startTimeLong)) else "-"
+            val syncTimeStr = sdf.format(Date())
+
+            val workbook = XSSFWorkbook()
+
+            // SHEET 1: Summary
+            val summarySheet = workbook.createSheet("خلاصه گزارش")
+
+            // Set title
+            val r0 = summarySheet.createRow(0)
+            r0.createCell(0).setCellValue("گزارش جامع وضعیت سامانه ارسال ایمیل")
+
+            // Statistics Rows
+            val stats = listOf(
+                "کل آدرس‌های ایمیل وارد شده" to allItems.size,
+                "تعداد ارسال موفق" to allItems.count { it.status == "SENT" },
+                "تعداد باقی‌مانده در صف" to allItems.count { it.status == "PENDING" },
+                "تعداد ایمیل‌های با فرمت اشتباه" to allItems.count { it.status == "INVALID_FORMAT" },
+                "تعداد ریجکت شده توسط سرور (SMTP)" to allItems.count { it.status == "SMTP_REJECTED" },
+                "تاریخ شروع عملیات ارسال" to startTimeStr,
+                "آخرین زمان همگام‌سازی (Sync)" to syncTimeStr
+            )
+
+            stats.forEachIndexed { idx, pair ->
+                val r = summarySheet.createRow(idx + 2)
+                r.createCell(0).setCellValue(pair.first)
+                r.createCell(1).setCellValue(pair.second.toString())
+            }
+
+            // Sender stats title
+            val rSenderTitle = summarySheet.createRow(stats.size + 4)
+            rSenderTitle.createCell(0).setCellValue("آمار عملکرد اکانت‌های فرستنده")
+
+            val rSenderHeader = summarySheet.createRow(stats.size + 5)
+            rSenderHeader.createCell(0).setCellValue("اکانت فرستنده")
+            rSenderHeader.createCell(1).setCellValue("تعداد ارسال موفق")
+
+            senderStats.forEachIndexed { idx, stat ->
+                val r = summarySheet.createRow(stats.size + 6 + idx)
+                r.createCell(0).setCellValue(stat.senderEmail)
+                r.createCell(1).setCellValue(stat.count.toDouble())
+            }
+
+
+            // SHEET 2: Errors & Invalid format
+            val errorSheet = workbook.createSheet("ایمیل‌های اشتباه و خطاها")
+            val rErrorHeader = errorSheet.createRow(0)
+            rErrorHeader.createCell(0).setCellValue("آدرس ایمیل")
+            rErrorHeader.createCell(1).setCellValue("نوع خطا")
+            rErrorHeader.createCell(2).setCellValue("علت خطا")
+            rErrorHeader.createCell(3).setCellValue("زمان تلاش")
+            rErrorHeader.createCell(4).setCellValue("اکانت فرستنده")
+
+            val errorItems = allItems.filter { it.status == "INVALID_FORMAT" || it.status == "SMTP_REJECTED" }
+            errorItems.forEachIndexed { idx, item ->
+                val r = errorSheet.createRow(idx + 1)
+                r.createCell(0).setCellValue(item.email)
+                val errorType = if (item.status == "INVALID_FORMAT") "فرمت نامعتبر" else "رد شده توسط سرور (SMTP)"
+                r.createCell(1).setCellValue(errorType)
+                r.createCell(2).setCellValue(item.errorMessage ?: "نامشخص")
+                r.createCell(3).setCellValue(if (item.sentAt != null) sdf.format(Date(item.sentAt)) else "-")
+                r.createCell(4).setCellValue(item.senderEmail ?: "-")
+            }
+
+
+            // SHEET 3: Sent emails
+            val sentSheet = workbook.createSheet("ایمیل‌های موفق")
+            val rSentHeader = sentSheet.createRow(0)
+            rSentHeader.createCell(0).setCellValue("آدرس ایمیل")
+            rSentHeader.createCell(1).setCellValue("موضوع ایمیل")
+            rSentHeader.createCell(2).setCellValue("اکانت فرستنده")
+            rSentHeader.createCell(3).setCellValue("زمان ارسال")
+
+            val sentItems = allItems.filter { it.status == "SENT" }
+            sentItems.forEachIndexed { idx, item ->
+                val r = sentSheet.createRow(idx + 1)
+                r.createCell(0).setCellValue(item.email)
+                r.createCell(1).setCellValue(item.subject)
+                r.createCell(2).setCellValue(item.senderEmail ?: "-")
+                r.createCell(3).setCellValue(if (item.sentAt != null) sdf.format(Date(item.sentAt)) else "-")
+            }
+
+            val filename = "comprehensive_email_report_${System.currentTimeMillis()}.xlsx"
+            val mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+            val contentValues = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, filename)
+                put(MediaStore.Downloads.MIME_TYPE, mimeType)
+                put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+
+            val resolver = context.contentResolver
+            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
+
+            if (uri != null) {
+                resolver.openOutputStream(uri).use { outputStream ->
+                    if (outputStream != null) {
+                        workbook.write(outputStream)
+                        outputStream.flush()
+                    }
+                }
+                workbook.close()
+
+                contentValues.clear()
+                contentValues.put(MediaStore.Downloads.IS_PENDING, 0)
+                resolver.update(uri, contentValues, null, null)
+
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "گزارش اکسل با موفقیت تولید شد ✅", Toast.LENGTH_LONG).show()
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "خطا در تولید گزارش اکسل: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
     }
 }

@@ -10,7 +10,7 @@ import com.easystyleshop.massengerapp.data.model.EmailQueueItem
 
 @Database(
     entities = [User::class, Message::class, EmailQueueItem::class],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
