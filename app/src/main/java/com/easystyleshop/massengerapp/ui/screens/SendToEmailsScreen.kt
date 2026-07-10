@@ -647,20 +647,19 @@ fun SendToEmailsContent(
     }
 }
 
-// Read emails helper from raw resources (scans all cells in all rows to find emails)
+// Read emails helper from raw resources (targets Column B index 1 and skips row 0 header)
 fun readEmailsFromRawResource(context: Context): List<String> {
     val emails = mutableListOf<String>()
     try {
         context.resources.openRawResource(com.easystyleshop.massengerapp.R.raw.email).use { inputStream ->
             val workbook = WorkbookFactory.create(inputStream)
             val sheet = workbook.getSheetAt(0)
-            for (row in sheet) {
-                for (cell in row) {
-                    val value = cell?.toString()?.trim()
-                    if (!value.isNullOrBlank()) {
-                        emails.add(value)
-                        break // Move to the next row once an email is found in this row
-                    }
+            for (rowNum in 1..sheet.lastRowNum) {
+                val row = sheet.getRow(rowNum) ?: continue
+                val cell = row.getCell(1) // Column B (index 1)
+                val value = cell?.toString()?.trim()
+                if (!value.isNullOrBlank()) {
+                    emails.add(value)
                 }
             }
             workbook.close()
@@ -671,20 +670,19 @@ fun readEmailsFromRawResource(context: Context): List<String> {
     return emails
 }
 
-// Read emails from URI helper (scans all cells in all rows to find emails)
+// Read emails from URI helper (targets Column B index 1 and skips row 0 header)
 fun readEmailsFromExcel(context: Context, uri: Uri): List<String> {
     val emails = mutableListOf<String>()
     try {
         context.contentResolver.openInputStream(uri)?.use { inputStream ->
             val workbook = WorkbookFactory.create(inputStream)
             val sheet = workbook.getSheetAt(0)
-            for (row in sheet) {
-                for (cell in row) {
-                    val value = cell?.toString()?.trim()
-                    if (!value.isNullOrBlank()) {
-                        emails.add(value)
-                        break // Move to the next row once an email is found in this row
-                    }
+            for (rowNum in 1..sheet.lastRowNum) {
+                val row = sheet.getRow(rowNum) ?: continue
+                val cell = row.getCell(1) // Column B (index 1)
+                val value = cell?.toString()?.trim()
+                if (!value.isNullOrBlank()) {
+                    emails.add(value)
                 }
             }
             workbook.close()
