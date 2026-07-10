@@ -661,8 +661,8 @@ fun SendToEmailsContent(
                             queueList.addAll(updatedPending)
                         }
 
-                        // Required 5 seconds delay between each email
-                        delay(5_000)
+                        // Required 30 seconds delay between each email
+                        delay(30_000)
                     }
 
                     // Save Excel Report for this batch immediately
