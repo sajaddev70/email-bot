@@ -65,10 +65,10 @@ fun SendToEmailsContent(
 
     // Sender UI States
     var senderEmail by remember {
-        mutableStateOf(sharedPrefs.getString("sender_email", "devstest90@gmail.com") ?: "devstest90@gmail.com")
+        mutableStateOf(sharedPrefs.getString("sender_email", "ovichsuzam@gmail.com") ?: "ovichsuzam@gmail.com")
     }
     var senderPassword by remember {
-        mutableStateOf(sharedPrefs.getString("sender_password", "lvvo wzia syol xclo") ?: "lvvo wzia syol xclo")
+        mutableStateOf(sharedPrefs.getString("sender_password", "lxps izzq fpat syjt") ?: "lxps izzq fpat syjt")
     }
     var passwordVisible by remember { mutableStateOf(false) }
 
