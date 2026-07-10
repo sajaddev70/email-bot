@@ -62,8 +62,16 @@ class MainActivity2 : ComponentActivity() {
                                         }
                                         mimeMessage.saveChanges()
 
-                                        Log.d("MainActivity2", "Calling Transport.send() to dispatch the email to $email")
-                                        Transport.send(mimeMessage)
+                                        Log.d("MainActivity2", "Obtaining SMTP transport and explicitly connecting to guarantee authentication...")
+                                        val transport = session.getTransport("smtp")
+                                        transport.connect("smtp.gmail.com", senderEmail, senderPassword)
+
+                                        Log.d("MainActivity2", "Sending message via transport.sendMessage()...")
+                                        transport.sendMessage(mimeMessage, mimeMessage.allRecipients)
+
+                                        Log.d("MainActivity2", "Closing transport...")
+                                        transport.close()
+
                                         Log.d("MainActivity2", "Email successfully sent to $email")
                                         true
                                     } catch (e: Exception) {
