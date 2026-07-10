@@ -65,10 +65,10 @@ fun SendToEmailsContent(
 
     // Sender UI States
     var senderEmail by remember {
-        mutableStateOf(sharedPrefs.getString("sender_email", "ovichsuzam@gmail.com") ?: "ovichsuzam@gmail.com")
+        mutableStateOf(sharedPrefs.getString("sender_email", "test.test.dev.1991@gmail.com") ?: "test.test.dev.1991@gmail.com")
     }
     var senderPassword by remember {
-        mutableStateOf(sharedPrefs.getString("sender_password", "lxps izzq fpat syjt") ?: "lxps izzq fpat syjt")
+        mutableStateOf(sharedPrefs.getString("sender_password", "cgfy nwwj peir orlu") ?: "cgfy nwwj peir orlu")
     }
     var passwordVisible by remember { mutableStateOf(false) }
 
@@ -79,7 +79,7 @@ fun SendToEmailsContent(
     // Validation States
     var emailError by remember { mutableStateOf(false) }
     var contentError by remember { mutableStateOf(false) }
-
+    
     // Queue & Send Status
     val queueList = remember { mutableStateListOf<EmailQueueItem>() }
     var totalEmailsLoaded by remember { mutableStateOf(0) }
@@ -662,7 +662,7 @@ fun SendToEmailsContent(
                         }
 
                         // Required 30 seconds delay between each email
-                        delay(30_000)
+                        delay(100_000)
                     }
 
                     // Save Excel Report for this batch immediately
