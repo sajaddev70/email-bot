@@ -14,6 +14,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.easystyleshop.massengerapp.data.local.AppDatabase
 import com.easystyleshop.massengerapp.data.model.EmailQueueItem
+import com.easystyleshop.massengerapp.ui.MainActivity2
 import com.easystyleshop.massengerapp.util.generateComprehensiveEmailReport
 import kotlinx.coroutines.*
 import java.util.Properties
@@ -131,10 +132,14 @@ class EmailSendingService : Service() {
 
                     val item = pendingList.first()
                     val totalPending = pendingList.size
+                    val totalSent = db.emailQueueDao().getSentCount()
+                    val totalInvalid = db.emailQueueDao().getInvalidFormatCount()
+                    val totalRejected = db.emailQueueDao().getSmtpRejectedCount()
+                    val totalFailed = totalInvalid + totalRejected
 
                     updateNotification(
-                        "در حال ارسال ایمیل‌ها...",
-                        "ارسال به ${item.email} (باقی‌مانده: $totalPending)"
+                        "در حال ارسال ایمیل‌ها... 📧",
+                        "موفق: $totalSent | خطا: $totalFailed | باقی‌مانده: $totalPending"
                     )
 
                     // 1. Structural Validation
@@ -205,6 +210,14 @@ class EmailSendingService : Service() {
                             status = "SENT",
                             senderEmail = senderEmail,
                             sentAt = System.currentTimeMillis()
+                        )
+                        db.emailQueueDao().update(updatedItem)
+                    } else {
+                        val updatedItem = item.copy(
+                            status = "SMTP_REJECTED",
+                            senderEmail = senderEmail,
+                            sentAt = System.currentTimeMillis(),
+                            errorMessage = "ارسال ناموفق یا ریجکت شده توسط سرور"
                         )
                         db.emailQueueDao().update(updatedItem)
                     }
@@ -291,11 +304,23 @@ class EmailSendingService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        // Launch MainActivity2 on notification click
+        val launchIntent = Intent(this, MainActivity2::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val launchPendingIntent = PendingIntent.getActivity(
+            this,
+            1,
+            launchIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setOngoing(true)
+            .setContentIntent(launchPendingIntent) // Open app when clicked
             .addAction(android.R.drawable.ic_media_pause, "توقف ارسال", stopPendingIntent)
             .build()
     }

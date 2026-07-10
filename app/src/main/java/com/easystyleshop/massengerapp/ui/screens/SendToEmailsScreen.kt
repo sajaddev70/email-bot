@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.net.Uri
+import android.os.Build
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -49,6 +50,22 @@ fun SendToEmailsContent(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+
+    // Dynamically request notification permissions on Android 13+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { isGranted ->
+            if (!isGranted) {
+                Toast.makeText(context, "جهت مشاهده وضعیت ارسال در پس‌زمینه، دسترسی نوتیفیکیشن لازم است.", Toast.LENGTH_LONG).show()
+            }
+        }
+    )
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
 
     // Pass composable-provided onSend logic down to EmailSendingService statically
     LaunchedEffect(onSend) {
