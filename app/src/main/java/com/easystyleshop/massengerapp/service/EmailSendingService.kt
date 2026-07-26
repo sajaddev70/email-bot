@@ -163,7 +163,7 @@ class EmailSendingService : Service() {
 
                     // 2. SMTP Sending (Using composable-provided onSend lambda or local SMTP fallback)
                     var isSuccess = false
-                    var sendingError: Exception? = null
+                    var errorMsg: String? = null
                     try {
                         val senderLambda = onSendLambda
                         if (senderLambda != null) {
@@ -172,9 +172,9 @@ class EmailSendingService : Service() {
                             isSuccess = sendEmailSmtp(sharedPrefs, senderEmail, senderPassword, item.email, item.subject, item.content, item.imageUri, item.videoUri)
                         }
                     } catch (e: Exception) {
-                        sendingError = e
                         val errMsg = e.message ?: ""
                         Log.e("EmailSendingService", "Error sending to ${item.email}: $errMsg", e)
+                        errorMsg = errMsg
 
                         val isAuthError = e is AuthenticationFailedException ||
                                 errMsg.contains("534-5.7.9") ||
@@ -205,14 +205,6 @@ class EmailSendingService : Service() {
                             updateNotification("خطای اتصال شبکه", "اتصال اینترنت برقرار نیست. بعداً تلاش خواهد شد.")
                             stopSelf()
                             return@launch
-                        } else {
-                            val updatedItem = item.copy(
-                                status = "SMTP_REJECTED",
-                                senderEmail = senderEmail,
-                                sentAt = System.currentTimeMillis(),
-                                errorMessage = errMsg
-                            )
-                            db.emailQueueDao().update(updatedItem)
                         }
                     }
 
@@ -223,12 +215,12 @@ class EmailSendingService : Service() {
                             sentAt = System.currentTimeMillis()
                         )
                         db.emailQueueDao().update(updatedItem)
-                    } else if (sendingError == null) {
+                    } else {
                         val updatedItem = item.copy(
                             status = "SMTP_REJECTED",
                             senderEmail = senderEmail,
                             sentAt = System.currentTimeMillis(),
-                            errorMessage = "ارسال ناموفق یا ریجکت شده توسط سرور"
+                            errorMessage = errorMsg ?: "ارسال ناموفق یا ریجکت شده توسط سرور"
                         )
                         db.emailQueueDao().update(updatedItem)
                     }
@@ -286,6 +278,10 @@ class EmailSendingService : Service() {
             put("mail.smtp.starttls.enable", "true")
             put("mail.smtp.starttls.required", "true")
             put("mail.smtp.ssl.enable", "false")
+            // Robust SMTP connection and transmission timeouts
+            put("mail.smtp.connectiontimeout", "120000") // 2 minutes
+            put("mail.smtp.timeout", "120000")           // 2 minutes
+            put("mail.smtp.writetimeout", "120000")      // 2 minutes
         }
 
         val session = Session.getInstance(props, object : Authenticator() {
@@ -310,18 +306,19 @@ class EmailSendingService : Service() {
                 }
                 multipart.addBodyPart(textBodyPart)
 
-                // Image attachment
+                // Image attachment with live upload progress tracking
                 if (!imageUri.isNullOrBlank()) {
                     try {
                         val file = File(imageUri)
                         if (file.exists()) {
-                            updateStatus("در حال ضمیمه کردن و آپلود تصویر (${file.name})...")
                             val imagePart = MimeBodyPart()
-                            val dataSource = FileDataSource(file)
+                            val dataSource = ServiceProgressDataSource(file) { percent ->
+                                updateStatus("در حال آپلود و ضمیمه کردن تصویر (${file.name}): $percent%...")
+                            }
                             imagePart.dataHandler = DataHandler(dataSource)
                             imagePart.fileName = file.name
                             multipart.addBodyPart(imagePart)
-                            Log.d("EmailSendingService", "Attached image from path: $imageUri")
+                            Log.d("EmailSendingService", "Attached image with progress from path: $imageUri")
                         } else {
                             Log.w("EmailSendingService", "Image file does not exist: $imageUri")
                         }
@@ -330,18 +327,19 @@ class EmailSendingService : Service() {
                     }
                 }
 
-                // Video attachment
+                // Video attachment with live upload progress tracking
                 if (!videoUri.isNullOrBlank()) {
                     try {
                         val file = File(videoUri)
                         if (file.exists()) {
-                            updateStatus("در حال ضمیمه کردن و آپلود ویدیو (${file.name})...")
                             val videoPart = MimeBodyPart()
-                            val dataSource = FileDataSource(file)
+                            val dataSource = ServiceProgressDataSource(file) { percent ->
+                                updateStatus("در حال آپلود و ضمیمه کردن ویدیو (${file.name}): $percent%...")
+                            }
                             videoPart.dataHandler = DataHandler(dataSource)
                             videoPart.fileName = file.name
                             multipart.addBodyPart(videoPart)
-                            Log.d("EmailSendingService", "Attached video from path: $videoUri")
+                            Log.d("EmailSendingService", "Attached video with progress from path: $videoUri")
                         } else {
                             Log.w("EmailSendingService", "Video file does not exist: $videoUri")
                         }
@@ -426,4 +424,61 @@ class EmailSendingService : Service() {
         serviceJob.cancel()
         super.onDestroy()
     }
+}
+
+// Progress-tracking DataSource implementation for background service fallback sends
+class ServiceProgressDataSource(
+    private val file: File,
+    private val onProgress: (percent: Int) -> Unit
+) : javax.activation.DataSource {
+    override fun getInputStream(): java.io.InputStream {
+        val fileStream = java.io.FileInputStream(file)
+        val totalBytes = file.length()
+        return object : java.io.InputStream() {
+            private var bytesRead: Long = 0
+            private var lastPercent: Int = -1
+
+            private fun updateProgress(len: Int) {
+                if (len > 0) {
+                    bytesRead += len
+                    val percent = if (totalBytes > 0) (bytesRead * 100 / totalBytes).toInt() else 0
+                    if (percent != lastPercent) {
+                        lastPercent = percent
+                        onProgress(percent)
+                    }
+                }
+            }
+
+            override fun read(): Int {
+                val b = fileStream.read()
+                if (b != -1) {
+                    updateProgress(1)
+                }
+                return b
+            }
+
+            override fun read(b: ByteArray): Int {
+                val len = fileStream.read(b)
+                updateProgress(len)
+                return len
+            }
+
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                val readLen = fileStream.read(b, off, len)
+                updateProgress(readLen)
+                return readLen
+            }
+
+            override fun close() {
+                fileStream.close()
+            }
+
+            override fun available(): Int = fileStream.available()
+            override fun skip(n: Long): Long = fileStream.skip(n)
+        }
+    }
+
+    override fun getOutputStream(): java.io.OutputStream = throw UnsupportedOperationException()
+    override fun getContentType(): String = "application/octet-stream"
+    override fun getName(): String = file.name
 }

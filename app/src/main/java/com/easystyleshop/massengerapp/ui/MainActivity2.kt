@@ -54,6 +54,10 @@ class MainActivity2 : ComponentActivity() {
                                             put("mail.smtp.starttls.enable", "true")
                                             put("mail.smtp.starttls.required", "true")
                                             put("mail.smtp.ssl.enable", "false")
+                                            // Robust SMTP connection and transmission timeouts
+                                            put("mail.smtp.connectiontimeout", "120000") // 2 minutes
+                                            put("mail.smtp.timeout", "120000")           // 2 minutes
+                                            put("mail.smtp.writetimeout", "120000")      // 2 minutes
                                         }
 
                                         val session = Session.getInstance(props, object : Authenticator() {
@@ -78,18 +82,19 @@ class MainActivity2 : ComponentActivity() {
                                                 }
                                                 multipart.addBodyPart(textBodyPart)
 
-                                                // Image attachment
+                                                // Image attachment with live upload progress
                                                 if (!imageUri.isNullOrBlank()) {
                                                     try {
                                                         val file = File(imageUri)
                                                         if (file.exists()) {
-                                                            updateStatus("در حال ضمیمه کردن و آپلود تصویر (${file.name})...")
                                                             val imagePart = MimeBodyPart()
-                                                            val dataSource = FileDataSource(file)
+                                                            val dataSource = ProgressDataSource(file) { percent ->
+                                                                updateStatus("در حال آپلود و ضمیمه کردن تصویر (${file.name}): $percent%...")
+                                                            }
                                                             imagePart.dataHandler = DataHandler(dataSource)
                                                             imagePart.fileName = file.name
                                                             multipart.addBodyPart(imagePart)
-                                                            Log.d("MainActivity2", "Attached image from path: $imageUri")
+                                                            Log.d("MainActivity2", "Attached image from path with progress: $imageUri")
                                                         } else {
                                                             Log.w("MainActivity2", "Image file does not exist: $imageUri")
                                                         }
@@ -98,18 +103,19 @@ class MainActivity2 : ComponentActivity() {
                                                     }
                                                 }
 
-                                                // Video attachment
+                                                // Video attachment with live upload progress
                                                 if (!videoUri.isNullOrBlank()) {
                                                     try {
                                                         val file = File(videoUri)
                                                         if (file.exists()) {
-                                                            updateStatus("در حال ضمیمه کردن و آپلود ویدیو (${file.name})...")
                                                             val videoPart = MimeBodyPart()
-                                                            val dataSource = FileDataSource(file)
+                                                            val dataSource = ProgressDataSource(file) { percent ->
+                                                                updateStatus("در حال آپلود و ضمیمه کردن ویدیو (${file.name}): $percent%...")
+                                                            }
                                                             videoPart.dataHandler = DataHandler(dataSource)
                                                             videoPart.fileName = file.name
                                                             multipart.addBodyPart(videoPart)
-                                                            Log.d("MainActivity2", "Attached video from path: $videoUri")
+                                                            Log.d("MainActivity2", "Attached video from path with progress: $videoUri")
                                                         } else {
                                                             Log.w("MainActivity2", "Video file does not exist: $videoUri")
                                                         }
@@ -153,4 +159,61 @@ class MainActivity2 : ComponentActivity() {
             }
         }
     }
+}
+
+// Progress-tracking DataSource implementation for live attachment upload updates
+class ProgressDataSource(
+    private val file: File,
+    private val onProgress: (percent: Int) -> Unit
+) : javax.activation.DataSource {
+    override fun getInputStream(): java.io.InputStream {
+        val fileStream = java.io.FileInputStream(file)
+        val totalBytes = file.length()
+        return object : java.io.InputStream() {
+            private var bytesRead: Long = 0
+            private var lastPercent: Int = -1
+
+            private fun updateProgress(len: Int) {
+                if (len > 0) {
+                    bytesRead += len
+                    val percent = if (totalBytes > 0) (bytesRead * 100 / totalBytes).toInt() else 0
+                    if (percent != lastPercent) {
+                        lastPercent = percent
+                        onProgress(percent)
+                    }
+                }
+            }
+
+            override fun read(): Int {
+                val b = fileStream.read()
+                if (b != -1) {
+                    updateProgress(1)
+                }
+                return b
+            }
+
+            override fun read(b: ByteArray): Int {
+                val len = fileStream.read(b)
+                updateProgress(len)
+                return len
+            }
+
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                val readLen = fileStream.read(b, off, len)
+                updateProgress(readLen)
+                return readLen
+            }
+
+            override fun close() {
+                fileStream.close()
+            }
+
+            override fun available(): Int = fileStream.available()
+            override fun skip(n: Long): Long = fileStream.skip(n)
+        }
+    }
+
+    override fun getOutputStream(): java.io.OutputStream = throw UnsupportedOperationException()
+    override fun getContentType(): String = "application/octet-stream"
+    override fun getName(): String = file.name
 }
