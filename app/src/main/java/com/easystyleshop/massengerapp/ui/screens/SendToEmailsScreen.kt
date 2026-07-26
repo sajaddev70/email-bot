@@ -14,10 +14,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowRight
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -43,6 +43,27 @@ import org.apache.poi.ss.usermodel.WorkbookFactory
 import java.text.SimpleDateFormat
 import java.util.*
 import java.io.File
+
+const val DEFAULT_TEMPLATE_SUBJECT = "Support My Android App on Google Play"
+const val DEFAULT_TEMPLATE_BODY = """Dear,
+
+I hope this email finds you well.
+
+I recently published my Android application on Google Play after spending a great deal of time designing, developing, and testing it. It has been an exciting journey, and I would be truly grateful for your support.
+
+If you have just a few minutes, I would sincerely appreciate it if you could install the app using the link below:
+
+https://play.google.com/store/apps/details?id=com.calecho.calanderr.app
+
+If you enjoy using it, a rating or a short review on Google Play would mean even more. Your support helps improve the app's visibility, reach more users, and motivates me to continue improving it with new features and updates.
+
+I've also attached a few screenshots and a short video so you can quickly see what the app offers before installing it.
+
+Thank you very much for your time, kindness, and support. It truly means a lot to me, and I sincerely appreciate your help.
+
+Warm regards,
+
+Jose Campos"""
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -92,9 +113,13 @@ fun SendToEmailsContent(
     }
     var passwordVisible by remember { mutableStateOf(false) }
 
-    // Email Message States
-    var subject by remember { mutableStateOf("موضوع پیام تستی") }
-    var content by remember { mutableStateOf("سلام، این یک ایمیل تستی خودکار است.") }
+    // Email Message States (Will be initialized from persistent template on startup)
+    var subject by remember { mutableStateOf(DEFAULT_TEMPLATE_SUBJECT) }
+    var content by remember { mutableStateOf(DEFAULT_TEMPLATE_BODY) }
+
+    // Active file names
+    var activeExcelName by remember { mutableStateOf("فایل اکسل پیش‌فرض (email.xlsx)") }
+    var activeTemplateName by remember { mutableStateOf("قالب پیش‌فرض (Default Email Template)") }
 
     // Optional Attachment States
     var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
@@ -172,7 +197,6 @@ fun SendToEmailsContent(
         }
     }
 
-    var sourceName by remember { mutableStateOf("فایل اکسل پیش‌فرض (email.xlsx)") }
     var showWrongEmailsDialog by remember { mutableStateOf(false) }
     var wrongEmailsList by remember { mutableStateOf(listOf<EmailQueueItem>()) }
 
@@ -189,11 +213,54 @@ fun SendToEmailsContent(
         }
     }
 
-    // Load Initial Queue from Raw Excel if DB is empty or has old corrupted imports
+    // Load persistent template and active Excel details, and perform startup database checks
     LaunchedEffect(Unit) {
         scope.launch(Dispatchers.IO) {
+            // 1. Load active template details
+            val savedTemplateName = sharedPrefs.getString("custom_template_name", "") ?: ""
+            val templateFile = File(context.filesDir, "custom_template.txt")
+            if (savedTemplateName.isNotEmpty() && templateFile.exists()) {
+                try {
+                    val savedText = templateFile.readText()
+                    val parsed = parseTemplateText(savedText)
+                    if (parsed != null) {
+                        subject = parsed.first
+                        content = parsed.second
+                        activeTemplateName = savedTemplateName
+                    } else {
+                        templateFile.delete()
+                        sharedPrefs.edit().remove("custom_template_name").apply()
+                        subject = DEFAULT_TEMPLATE_SUBJECT
+                        content = DEFAULT_TEMPLATE_BODY
+                        activeTemplateName = "قالب پیش‌فرض (Default Email Template)"
+                    }
+                } catch (e: Exception) {
+                    subject = DEFAULT_TEMPLATE_SUBJECT
+                    content = DEFAULT_TEMPLATE_BODY
+                    activeTemplateName = "قالب پیش‌فرض (Default Email Template)"
+                }
+            } else {
+                subject = DEFAULT_TEMPLATE_SUBJECT
+                content = DEFAULT_TEMPLATE_BODY
+                activeTemplateName = "قالب پیش‌فرض (Default Email Template)"
+            }
+
+            // 2. Load active Excel details
+            val savedExcelUri = sharedPrefs.getString("custom_excel_uri", "") ?: ""
+            val savedExcelName = sharedPrefs.getString("custom_excel_name", "") ?: ""
+            if (savedExcelUri.isNotEmpty()) {
+                activeExcelName = savedExcelName.ifEmpty { "فایل اکسل سفارشی" }
+            } else {
+                activeExcelName = "فایل اکسل پیش‌فرض (email.xlsx)"
+            }
+
+            // 3. Queue verification & self-healing load
             val allItems = emailQueueDao.getAllItems()
-            val hasCorruptedData = allItems.any { it.email == "ROW" || it.email.toDoubleOrNull() != null }
+            val hasCorruptedData = allItems.any {
+                it.email == "ROW" ||
+                it.email.toDoubleOrNull() != null ||
+                !android.util.Patterns.EMAIL_ADDRESS.matcher(it.email).matches()
+            }
             if (allItems.isEmpty() || hasCorruptedData) {
                 emailQueueDao.deleteAll()
 
@@ -204,9 +271,9 @@ fun SendToEmailsContent(
                     .putLong("sending_start_time", 0L)
                     .apply()
 
-                val rawEmails = readEmailsFromRawResource(context)
-                if (rawEmails.isNotEmpty()) {
-                    val queueItems = rawEmails.map { email ->
+                val activeEmails = loadEmailsFromActiveSource(context)
+                if (activeEmails.isNotEmpty()) {
+                    val queueItems = activeEmails.map { email ->
                         EmailQueueItem(email = email, subject = subject, content = content)
                     }
                     emailQueueDao.insertAll(queueItems)
@@ -220,33 +287,91 @@ fun SendToEmailsContent(
         contract = ActivityResultContracts.OpenDocument(),
         onResult = { uri: Uri? ->
             uri?.let {
-                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                scope.launch(Dispatchers.IO) {
-                    val imported = readEmailsFromExcel(context, uri)
-                    if (imported.isNotEmpty()) {
-                        emailQueueDao.deleteAll() // Clear old queue
+                try {
+                    context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    scope.launch(Dispatchers.IO) {
+                        val imported = readEmailsFromExcel(context, uri)
+                        if (imported.isNotEmpty()) {
+                            val displayName = getUriFileName(context, uri)
 
-                        // Reset stats in preferences
-                        sharedPrefs.edit()
-                            .putInt("batch_processed_count", 0)
-                            .putBoolean("is_batch_paused", false)
-                            .putLong("sending_start_time", 0L)
-                            .apply()
+                            sharedPrefs.edit()
+                                .putString("custom_excel_uri", uri.toString())
+                                .putString("custom_excel_name", displayName)
+                                .putInt("batch_processed_count", 0)
+                                .putBoolean("is_batch_paused", false)
+                                .putLong("sending_start_time", 0L)
+                                .apply()
 
-                        val queueItems = imported.map { email ->
-                            EmailQueueItem(email = email, subject = subject, content = content)
-                        }
-                        emailQueueDao.insertAll(queueItems)
+                            emailQueueDao.deleteAll() // Clear old queue
+                            val queueItems = imported.map { email ->
+                                EmailQueueItem(email = email, subject = subject, content = content)
+                            }
+                            emailQueueDao.insertAll(queueItems)
 
-                        withContext(Dispatchers.Main) {
-                            sourceName = "فایل اکسل سفارشی"
-                            Toast.makeText(context, "تعداد ${imported.size} ایمیل جدید با موفقیت وارد دیتابیس شد.", Toast.LENGTH_SHORT).show()
-                        }
-                    } else {
-                        withContext(Dispatchers.Main) {
-                            Toast.makeText(context, "هیچ ایمیل معتبری در فایل پیدا نشد", Toast.LENGTH_LONG).show()
+                            withContext(Dispatchers.Main) {
+                                activeExcelName = displayName
+                                Toast.makeText(context, "تعداد ${imported.size} ایمیل جدید از $displayName با موفقیت وارد دیتابیس شد.", Toast.LENGTH_SHORT).show()
+                            }
+                        } else {
+                            withContext(Dispatchers.Main) {
+                                Toast.makeText(context, "هیچ ایمیل معتبری در فایل پیدا نشد", Toast.LENGTH_LONG).show()
+                            }
                         }
                     }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    Toast.makeText(context, "خطا در بارگذاری فایل اکسل: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    )
+
+    // Template file picker launcher (.txt)
+    val templateLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+        onResult = { uri: Uri? ->
+            uri?.let {
+                try {
+                    context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    scope.launch(Dispatchers.IO) {
+                        context.contentResolver.openInputStream(uri)?.use { inputStream ->
+                            val text = inputStream.bufferedReader().use { it.readText() }
+                            val parsed = parseTemplateText(text)
+                            if (parsed != null) {
+                                // Save local copy
+                                val templateFile = File(context.filesDir, "custom_template.txt")
+                                templateFile.writeText(text)
+
+                                val displayName = getUriFileName(context, uri)
+                                sharedPrefs.edit()
+                                    .putString("custom_template_name", displayName)
+                                    .apply()
+
+                                // Update remaining pending items in database
+                                val pending = emailQueueDao.getAllPending()
+                                if (pending.isNotEmpty()) {
+                                    val updated = pending.map {
+                                        it.copy(subject = parsed.first, content = parsed.second)
+                                    }
+                                    emailQueueDao.insertAll(updated)
+                                }
+
+                                withContext(Dispatchers.Main) {
+                                    subject = parsed.first
+                                    content = parsed.second
+                                    activeTemplateName = displayName
+                                    Toast.makeText(context, "قالب ایمیل با موفقیت از فایل $displayName بارگذاری شد.", Toast.LENGTH_SHORT).show()
+                                }
+                            } else {
+                                withContext(Dispatchers.Main) {
+                                    Toast.makeText(context, "خطا: فرمت فایل متنی قالب نامعتبر است.", Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    Toast.makeText(context, "خطا در خواندن فایل قالب: ${e.message}", Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -273,37 +398,10 @@ fun SendToEmailsContent(
                     color = MaterialTheme.colorScheme.primary
                 )
                 Text(
-                    text = sourceName,
+                    text = "نمای بخش‌بندی شده Material 3",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
                 )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                IconButton(
-                    onClick = {
-                        scope.launch {
-                            generateComprehensiveEmailReport(context, db)
-                        }
-                    },
-                    colors = IconButtonDefaults.iconButtonColors(
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer
-                    )
-                ) {
-                    Icon(Icons.Default.Download, contentDescription = "دانلود گزارش اکسل")
-                }
-
-                IconButton(
-                    onClick = {
-                        excelLauncher.launch(arrayOf("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
-                    },
-                    colors = IconButtonDefaults.iconButtonColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
-                ) {
-                    Icon(Icons.Default.AttachFile, contentDescription = "Import Custom Excel")
-                }
             }
         }
 
@@ -311,7 +409,7 @@ fun SendToEmailsContent(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             // BATCH LIMIT / SERVICE WARNING BANNER
             if (isBatchPaused) {
@@ -341,65 +439,7 @@ fun SendToEmailsContent(
                 }
             }
 
-            // CARD 1: QUEUE STATUS CARD
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
-                    shape = RoundedCornerShape(16.dp)
-                ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Text(
-                            text = "وضعیت صف ارسال ایمیل (همگام‌سازی خودکار)",
-                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column {
-                                Text("کل ایمیل‌ها:", style = MaterialTheme.typography.bodySmall)
-                                Text("$totalCount", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold), color = MaterialTheme.colorScheme.primary)
-                            }
-                            Column {
-                                Text("موفق:", style = MaterialTheme.typography.bodySmall)
-                                Text("$sentCount", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold), color = Color(0xFF2E7D32))
-                            }
-                            Column {
-                                Text("باقی‌مانده:", style = MaterialTheme.typography.bodySmall)
-                                Text("$pendingCount", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold), color = Color(0xFFE65100))
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(12.dp))
-                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column {
-                                Text("فرمت اشتباه: $invalidFormatCount", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                                Text("رد شده توسط سرور (SMTP): $smtpRejectedCount", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                            }
-
-                            if (invalidFormatCount + smtpRejectedCount > 0) {
-                                TextButton(onClick = { showWrongEmailsDialog = true }) {
-                                    Text("مشاهده لیست خطاکارها", style = MaterialTheme.typography.labelMedium)
-                                    Icon(Icons.Default.ArrowRight, contentDescription = null)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // CARD 2: SENDER CONFIGURATION CARD
+            // 1. SENDER SETTINGS CARD
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -407,30 +447,34 @@ fun SendToEmailsContent(
                     elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
                     shape = RoundedCornerShape(16.dp)
                 ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
+                    Column(modifier = Modifier.padding(16.dp)) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween,
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text(
-                                text = "تنظیمات اکانت فرستنده ایمیل",
-                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Settings, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Sender Settings (تنظیمات فرستنده)",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
                             if (isServiceRunning) {
                                 Badge(
                                     containerColor = Color(0xFFE8F5E9),
                                     contentColor = Color(0xFF2E7D32)
                                 ) {
-                                    Text("سرویس پس‌زمینه فعال", modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                                    Text("سرویس فعال", modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
                                 }
                             } else {
                                 Badge(
                                     containerColor = MaterialTheme.colorScheme.secondaryContainer,
                                     contentColor = MaterialTheme.colorScheme.onSecondaryContainer
                                 ) {
-                                    Text("سرویس متوقف", modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                                    Text("متوقف شده", modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
                                 }
                             }
                         }
@@ -463,7 +507,7 @@ fun SendToEmailsContent(
                                 IconButton(onClick = { passwordVisible = !passwordVisible }) {
                                     Icon(
                                         imageVector = if (passwordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                        contentDescription = "Toggle password visibility"
+                                        contentDescription = "مشاهده کلمه عبور"
                                     )
                                 }
                             },
@@ -476,9 +520,7 @@ fun SendToEmailsContent(
 
                         OutlinedTextField(
                             value = delaySecondsStr,
-                            onValueChange = {
-                                delaySecondsStr = it
-                            },
+                            onValueChange = { delaySecondsStr = it },
                             enabled = !isServiceRunning,
                             label = { Text("فاصله زمانی ارسال بین هر ایمیل (ثانیه)") },
                             leadingIcon = { Icon(Icons.Default.Timer, contentDescription = null) },
@@ -489,7 +531,122 @@ fun SendToEmailsContent(
                 }
             }
 
-            // CARD 3: MESSAGE CONTENT CARD (Collapsed style)
+            // 2. EMAIL RECIPIENTS CARD
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.People, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Email Recipients (مخاطبین ایمیل)",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "منبع فعال: $activeExcelName",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column {
+                                Text("کل آدرس‌ها", style = MaterialTheme.typography.labelSmall)
+                                Text("$totalCount", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold), color = MaterialTheme.colorScheme.primary)
+                            }
+                            Column {
+                                Text("ارسال موفق", style = MaterialTheme.typography.labelSmall)
+                                Text("$sentCount", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold), color = Color(0xFF2E7D32))
+                            }
+                            Column {
+                                Text("در صف انتظار", style = MaterialTheme.typography.labelSmall)
+                                Text("$pendingCount", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold), color = Color(0xFFE65100))
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = {
+                                    excelLauncher.launch(arrayOf("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+                                },
+                                enabled = !isServiceRunning,
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                                ),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Icon(Icons.Default.AttachFile, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("انتخاب اکسل جدید", fontSize = 11.sp)
+                            }
+
+                            val isCustomExcelActive = sharedPrefs.getString("custom_excel_uri", null) != null
+                            Button(
+                                onClick = {
+                                    scope.launch(Dispatchers.IO) {
+                                        sharedPrefs.edit()
+                                            .remove("custom_excel_uri")
+                                            .remove("custom_excel_name")
+                                            .putInt("batch_processed_count", 0)
+                                            .putBoolean("is_batch_paused", false)
+                                            .putLong("sending_start_time", 0L)
+                                            .apply()
+
+                                        emailQueueDao.deleteAll()
+                                        val defaultEmails = readEmailsFromRawResource(context)
+                                        if (defaultEmails.isNotEmpty()) {
+                                            val queueItems = defaultEmails.map { email ->
+                                                EmailQueueItem(email = email, subject = subject, content = content)
+                                            }
+                                            emailQueueDao.insertAll(queueItems)
+                                        }
+
+                                        withContext(Dispatchers.Main) {
+                                            activeExcelName = "فایل اکسل پیش‌فرض (email.xlsx)"
+                                            Toast.makeText(context, "لیست ایمیل‌ها به حالت پیش‌فرض بازنشانی شد.", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                },
+                                enabled = !isServiceRunning && isCustomExcelActive,
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                ),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("بازنشانی به پیش‌فرض", fontSize = 11.sp)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. EMAIL TEMPLATE CARD
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -497,21 +654,39 @@ fun SendToEmailsContent(
                     elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
                     shape = RoundedCornerShape(16.dp)
                 ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Description, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Email Template (قالب متن ایمیل)",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "موضوع و متن ایمیل ارسالی",
-                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                            color = MaterialTheme.colorScheme.onSurface
+                            text = "قالب فعال: $activeTemplateName",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                         )
-                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
                         OutlinedTextField(
                             value = subject,
                             onValueChange = { subject = it },
                             enabled = !isServiceRunning,
-                            label = { Text("موضوع ایمیل") },
+                            label = { Text("موضوع ایمیل ارسالی (Subject)") },
                             modifier = Modifier.fillMaxWidth()
                         )
+
                         Spacer(modifier = Modifier.height(8.dp))
+
                         OutlinedTextField(
                             value = content,
                             onValueChange = {
@@ -519,18 +694,83 @@ fun SendToEmailsContent(
                                 contentError = false
                             },
                             enabled = !isServiceRunning,
-                            label = { Text("محتوای پیام") },
+                            label = { Text("متن محتوای ایمیل (Body)") },
                             isError = contentError,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(100.dp),
-                            maxLines = 4
+                                .height(160.dp),
+                            maxLines = 15
                         )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = {
+                                    templateLauncher.launch(arrayOf("text/plain"))
+                                },
+                                enabled = !isServiceRunning,
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                                ),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Icon(Icons.Default.AttachFile, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("بارگذاری قالب (.txt)", fontSize = 11.sp)
+                            }
+
+                            val isCustomTemplateActive = sharedPrefs.getString("custom_template_name", null) != null
+                            Button(
+                                onClick = {
+                                    scope.launch(Dispatchers.IO) {
+                                        val templateFile = File(context.filesDir, "custom_template.txt")
+                                        if (templateFile.exists()) {
+                                            templateFile.delete()
+                                        }
+                                        sharedPrefs.edit()
+                                            .remove("custom_template_name")
+                                            .apply()
+
+                                        val pending = emailQueueDao.getAllPending()
+                                        if (pending.isNotEmpty()) {
+                                            val updated = pending.map {
+                                                it.copy(subject = DEFAULT_TEMPLATE_SUBJECT, content = DEFAULT_TEMPLATE_BODY)
+                                            }
+                                            emailQueueDao.insertAll(updated)
+                                        }
+
+                                        withContext(Dispatchers.Main) {
+                                            subject = DEFAULT_TEMPLATE_SUBJECT
+                                            content = DEFAULT_TEMPLATE_BODY
+                                            activeTemplateName = "قالب پیش‌فرض (Default Email Template)"
+                                            Toast.makeText(context, "قالب ایمیل به حالت پیش‌فرض بازنشانی شد.", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                },
+                                enabled = !isServiceRunning && isCustomTemplateActive,
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                ),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("بازنشانی به پیش‌فرض", fontSize = 11.sp)
+                            }
+                        }
                     }
                 }
             }
 
-            // CARD 3.5: OPTIONAL ATTACHMENTS CARD
+            // 4. ATTACHMENTS CARD
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -538,13 +778,21 @@ fun SendToEmailsContent(
                     elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
                     shape = RoundedCornerShape(16.dp)
                 ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Text(
-                            text = "فایل‌های پیوست پیام (اختیاری - حداکثر ۵ مگابایت)",
-                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Share, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Attachments (ضمیمه کردن عکس و فیلم)",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -560,9 +808,9 @@ fun SendToEmailsContent(
                                 ),
                                 shape = RoundedCornerShape(8.dp)
                             ) {
-                                Icon(Icons.Default.Image, contentDescription = null)
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("انتخاب عکس", fontSize = 12.sp)
+                                Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("انتخاب عکس", fontSize = 11.sp)
                             }
 
                             Button(
@@ -575,9 +823,9 @@ fun SendToEmailsContent(
                                 ),
                                 shape = RoundedCornerShape(8.dp)
                             ) {
-                                Icon(Icons.Default.VideoLibrary, contentDescription = null)
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("انتخاب فیلم", fontSize = 12.sp)
+                                Icon(Icons.Default.VideoLibrary, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("انتخاب فیلم", fontSize = 11.sp)
                             }
                         }
 
@@ -587,7 +835,6 @@ fun SendToEmailsContent(
                             Spacer(modifier = Modifier.height(8.dp))
                         }
 
-                        // Display selected image details
                         imageLocalPath?.let { path ->
                             Row(
                                 modifier = Modifier
@@ -628,7 +875,7 @@ fun SendToEmailsContent(
                                             imageLocalPath = null
                                         }
                                     ) {
-                                        Icon(Icons.Default.Close, contentDescription = "حذف فایل", tint = MaterialTheme.colorScheme.error)
+                                        Icon(Icons.Default.Close, contentDescription = "حذف عکس", tint = MaterialTheme.colorScheme.error)
                                     }
                                 }
                             }
@@ -638,7 +885,6 @@ fun SendToEmailsContent(
                             Spacer(modifier = Modifier.height(8.dp))
                         }
 
-                        // Display selected video details
                         videoLocalPath?.let { path ->
                             Row(
                                 modifier = Modifier
@@ -679,7 +925,7 @@ fun SendToEmailsContent(
                                             videoLocalPath = null
                                         }
                                     ) {
-                                        Icon(Icons.Default.Close, contentDescription = "حذف فایل", tint = MaterialTheme.colorScheme.error)
+                                        Icon(Icons.Default.Close, contentDescription = "حذف ویدیو", tint = MaterialTheme.colorScheme.error)
                                     }
                                 }
                             }
@@ -688,7 +934,7 @@ fun SendToEmailsContent(
                 }
             }
 
-            // CARD 4: PROGRESS & CONTROL CARD
+            // 5. SENDING PROGRESS CARD
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -696,12 +942,19 @@ fun SendToEmailsContent(
                     elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
                     shape = RoundedCornerShape(16.dp)
                 ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Text(
-                            text = "وضعیت پیشرفت ارسال بسته ۵۰۰ تایی",
-                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.PlayCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Sending Progress (پیشرفت ارسال بسته ۵۰۰ تایی)",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
 
                         Spacer(modifier = Modifier.height(12.dp))
 
@@ -751,6 +1004,70 @@ fun SendToEmailsContent(
                     }
                 }
             }
+
+            // 6. LOGS & REPORT CARD
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Assessment, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Logs / Report (گزارش‌ها و خطاهای سیستم)",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = {
+                                    scope.launch {
+                                        generateComprehensiveEmailReport(context, db)
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                ),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("دانلود گزارش اکسل", fontSize = 11.sp)
+                            }
+
+                            Button(
+                                onClick = { showWrongEmailsDialog = true },
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                                    contentColor = MaterialTheme.colorScheme.onErrorContainer
+                                ),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Icon(Icons.Default.History, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("لیست خطاها ($invalidFormatCount)", fontSize = 11.sp)
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -759,14 +1076,12 @@ fun SendToEmailsContent(
         Button(
             onClick = {
                 if (isServiceRunning) {
-                    // Stop service
                     val stopIntent = Intent(context, EmailSendingService::class.java).apply {
                         action = EmailSendingService.ACTION_STOP
                     }
                     context.startService(stopIntent)
                     Toast.makeText(context, "سرویس ارسال متوقف شد", Toast.LENGTH_SHORT).show()
                 } else {
-                    // Start or resume service
                     if (senderEmail.isBlank() || !android.util.Patterns.EMAIL_ADDRESS.matcher(senderEmail).matches()) {
                         emailError = true
                         Toast.makeText(context, "لطفاً یک ایمیل فرستنده معتبر وارد کنید", Toast.LENGTH_SHORT).show()
@@ -780,14 +1095,12 @@ fun SendToEmailsContent(
 
                     val delaySec = delaySecondsStr.toIntOrNull() ?: 60
 
-                    // Save values
                     sharedPrefs.edit()
                         .putString("sender_email", senderEmail)
                         .putString("sender_password", senderPassword)
                         .putInt("delay_seconds", delaySec)
                         .apply()
 
-                    // If batch was paused, reset it when user chooses to resume with new credentials
                     if (isBatchPaused) {
                         sharedPrefs.edit()
                             .putInt("batch_processed_count", 0)
@@ -795,7 +1108,6 @@ fun SendToEmailsContent(
                             .apply()
                     }
 
-                    // Bulk update subject and content of remaining pending emails in DB
                     scope.launch(Dispatchers.IO) {
                         val pending = emailQueueDao.getAllPending()
                         if (pending.isNotEmpty()) {
@@ -891,27 +1203,116 @@ fun SendToEmailsContent(
     }
 }
 
-// Read emails helper from raw resources (targets Column B index 1 and skips row 0 header)
-fun readEmailsFromRawResource(context: Context): List<String> {
+// Smart Excel Reader and Template Parser Helpers
+
+fun findEmailColumnIndex(sheet: org.apache.poi.ss.usermodel.Sheet): Int {
+    val totalRows = sheet.lastRowNum
+    if (totalRows < 0) return 0
+
+    val maxRowsToScan = minOf(totalRows, 100) // Scan up to 100 rows for accuracy
+    val colScores = mutableMapOf<Int, Int>()
+
+    for (rowNum in 0..maxRowsToScan) {
+        val row = sheet.getRow(rowNum) ?: continue
+        for (colNum in 0 until row.lastCellNum.toInt()) {
+            val cell = row.getCell(colNum) ?: continue
+            val cellValue = cell.toString().trim()
+            if (android.util.Patterns.EMAIL_ADDRESS.matcher(cellValue).matches()) {
+                colScores[colNum] = colScores.getOrDefault(colNum, 0) + 1
+            }
+        }
+    }
+
+    val bestCol = colScores.entries.maxByOrNull { it.value }
+    return if (bestCol != null && bestCol.value > 0) {
+        bestCol.key
+    } else {
+        0 // Default fallback to Column A
+    }
+}
+
+fun readEmailsFromSheet(sheet: org.apache.poi.ss.usermodel.Sheet): List<String> {
+    val emailColIndex = findEmailColumnIndex(sheet)
     val emails = mutableListOf<String>()
+
+    for (rowNum in 0..sheet.lastRowNum) {
+        val row = sheet.getRow(rowNum) ?: continue
+        if (emailColIndex < row.lastCellNum) {
+            val cell = row.getCell(emailColIndex) ?: continue
+            val cellValue = cell.toString().trim()
+            if (android.util.Patterns.EMAIL_ADDRESS.matcher(cellValue).matches()) {
+                if (!emails.contains(cellValue)) {
+                    emails.add(cellValue)
+                }
+            }
+        }
+    }
+    return emails
+}
+
+fun readEmailsFromRawResource(context: Context): List<String> {
     try {
         context.resources.openRawResource(com.easystyleshop.massengerapp.R.raw.email).use { inputStream ->
             val workbook = WorkbookFactory.create(inputStream)
             val sheet = workbook.getSheetAt(0)
-            for (rowNum in 1..sheet.lastRowNum) {
-                val row = sheet.getRow(rowNum) ?: continue
-                val cell = row.getCell(1) // Column B (index 1)
-                val value = cell?.toString()?.trim()
-                if (!value.isNullOrBlank()) {
-                    emails.add(value)
-                }
-            }
+            val emails = readEmailsFromSheet(sheet)
             workbook.close()
+            return emails
         }
     } catch (e: Exception) {
         e.printStackTrace()
     }
-    return emails
+    return emptyList()
+}
+
+fun readEmailsFromCustomExcelUri(context: Context, uriString: String): List<String> {
+    try {
+        val uri = Uri.parse(uriString)
+        return readEmailsFromExcel(context, uri)
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    return emptyList()
+}
+
+fun loadEmailsFromActiveSource(context: Context): List<String> {
+    val sharedPrefs = context.getSharedPreferences("sender_prefs", Context.MODE_PRIVATE)
+    val customUriStr = sharedPrefs.getString("custom_excel_uri", null)
+    if (!customUriStr.isNullOrBlank()) {
+        try {
+            val emails = readEmailsFromCustomExcelUri(context, customUriStr)
+            if (emails.isNotEmpty()) {
+                return emails
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+    return readEmailsFromRawResource(context)
+}
+
+fun parseTemplateText(content: String): Pair<String, String>? {
+    if (content.isBlank()) return null
+    val lines = content.lines()
+    if (lines.isEmpty()) return null
+
+    var subject = ""
+    var body = ""
+
+    val firstLine = lines.first().trim()
+    if (firstLine.startsWith("Subject:", ignoreCase = true)) {
+        subject = firstLine.substring("Subject:".length).trim()
+        body = lines.drop(1).joinToString("\n").trim()
+    } else if (firstLine.startsWith("موضوع:", ignoreCase = true)) {
+        subject = firstLine.substring("موضوع:".length).trim()
+        body = lines.drop(1).joinToString("\n").trim()
+    } else {
+        subject = firstLine
+        body = lines.drop(1).joinToString("\n").trim()
+    }
+
+    if (subject.isBlank() && body.isBlank()) return null
+    return Pair(subject, body)
 }
 
 fun getUriSize(context: Context, uri: Uri): Long {
@@ -982,25 +1383,17 @@ fun copyUriToCache(context: Context, uri: Uri, prefix: String): String? {
     return null
 }
 
-// Read emails from URI helper (targets Column B index 1 and skips row 0 header)
 fun readEmailsFromExcel(context: Context, uri: Uri): List<String> {
-    val emails = mutableListOf<String>()
     try {
         context.contentResolver.openInputStream(uri)?.use { inputStream ->
             val workbook = WorkbookFactory.create(inputStream)
             val sheet = workbook.getSheetAt(0)
-            for (rowNum in 1..sheet.lastRowNum) {
-                val row = sheet.getRow(rowNum) ?: continue
-                val cell = row.getCell(1) // Column B (index 1)
-                val value = cell?.toString()?.trim()
-                if (!value.isNullOrBlank()) {
-                    emails.add(value)
-                }
-            }
+            val emails = readEmailsFromSheet(sheet)
             workbook.close()
+            return emails
         }
     } catch (e: Exception) {
         e.printStackTrace()
     }
-    return emails
+    return emptyList()
 }
