@@ -26,6 +26,11 @@ import javax.mail.Message
 import javax.mail.AuthenticationFailedException
 import javax.mail.internet.MimeMessage
 import javax.mail.internet.InternetAddress
+import javax.mail.internet.MimeMultipart
+import javax.mail.internet.MimeBodyPart
+import javax.activation.FileDataSource
+import javax.activation.DataHandler
+import java.io.File
 
 class EmailSendingService : Service() {
 
@@ -42,7 +47,7 @@ class EmailSendingService : Service() {
         const val ACTION_STOP = "com.easystyleshop.massengerapp.action.STOP"
 
         // Static lambda reference to invoke the composable-provided onSend logic
-        var onSendLambda: (suspend (senderEmail: String, senderPassword: String, recipientEmail: String, subject: String, content: String) -> Boolean)? = null
+        var onSendLambda: (suspend (senderEmail: String, senderPassword: String, recipientEmail: String, subject: String, content: String, imageUri: String?, videoUri: String?) -> Boolean)? = null
     }
 
     override fun onCreate() {
@@ -161,9 +166,9 @@ class EmailSendingService : Service() {
                     try {
                         val senderLambda = onSendLambda
                         if (senderLambda != null) {
-                            isSuccess = senderLambda(senderEmail, senderPassword, item.email, item.subject, item.content)
+                            isSuccess = senderLambda(senderEmail, senderPassword, item.email, item.subject, item.content, item.imageUri, item.videoUri)
                         } else {
-                            isSuccess = sendEmailSmtp(senderEmail, senderPassword, item.email, item.subject, item.content)
+                            isSuccess = sendEmailSmtp(senderEmail, senderPassword, item.email, item.subject, item.content, item.imageUri, item.videoUri)
                         }
                     } catch (e: Exception) {
                         val errMsg = e.message ?: ""
@@ -247,7 +252,9 @@ class EmailSendingService : Service() {
         senderPassword: String,
         recipientEmail: String,
         subject: String,
-        body: String
+        body: String,
+        imageUri: String?,
+        videoUri: String?
     ): Boolean {
         val props = Properties().apply {
             put("mail.smtp.host", "smtp.gmail.com")
@@ -268,7 +275,58 @@ class EmailSendingService : Service() {
             setFrom(InternetAddress(senderEmail))
             setRecipients(Message.RecipientType.TO, InternetAddress.parse(recipientEmail))
             setSubject(subject)
-            setText(body)
+
+            if (imageUri.isNullOrBlank() && videoUri.isNullOrBlank()) {
+                setText(body)
+            } else {
+                val multipart = MimeMultipart()
+
+                // Text part
+                val textBodyPart = MimeBodyPart().apply {
+                    setText(body, "UTF-8")
+                }
+                multipart.addBodyPart(textBodyPart)
+
+                // Image attachment
+                if (!imageUri.isNullOrBlank()) {
+                    try {
+                        val file = File(imageUri)
+                        if (file.exists()) {
+                            val imagePart = MimeBodyPart()
+                            val dataSource = FileDataSource(file)
+                            imagePart.dataHandler = DataHandler(dataSource)
+                            imagePart.fileName = file.name
+                            multipart.addBodyPart(imagePart)
+                            Log.d("EmailSendingService", "Attached image from path: $imageUri")
+                        } else {
+                            Log.w("EmailSendingService", "Image file does not exist: $imageUri")
+                        }
+                    } catch (e: Exception) {
+                        Log.e("EmailSendingService", "Failed to attach image: ${e.message}", e)
+                    }
+                }
+
+                // Video attachment
+                if (!videoUri.isNullOrBlank()) {
+                    try {
+                        val file = File(videoUri)
+                        if (file.exists()) {
+                            val videoPart = MimeBodyPart()
+                            val dataSource = FileDataSource(file)
+                            videoPart.dataHandler = DataHandler(dataSource)
+                            videoPart.fileName = file.name
+                            multipart.addBodyPart(videoPart)
+                            Log.d("EmailSendingService", "Attached video from path: $videoUri")
+                        } else {
+                            Log.w("EmailSendingService", "Video file does not exist: $videoUri")
+                        }
+                    } catch (e: Exception) {
+                        Log.e("EmailSendingService", "Failed to attach video: ${e.message}", e)
+                    }
+                }
+
+                setContent(multipart)
+            }
         }
         mimeMessage.saveChanges()
 

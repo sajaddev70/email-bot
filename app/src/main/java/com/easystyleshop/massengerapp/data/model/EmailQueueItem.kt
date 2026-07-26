@@ -14,5 +14,7 @@ data class EmailQueueItem(
     val createdAt: Long = System.currentTimeMillis(),
     val senderEmail: String? = null,
     val sentAt: Long? = null,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val imageUri: String? = null,
+    val videoUri: String? = null
 )

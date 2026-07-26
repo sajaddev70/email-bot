@@ -19,6 +19,11 @@ import java.util.*
 import javax.mail.*
 import javax.mail.internet.InternetAddress
 import javax.mail.internet.MimeMessage
+import javax.mail.internet.MimeMultipart
+import javax.mail.internet.MimeBodyPart
+import javax.activation.FileDataSource
+import javax.activation.DataHandler
+import java.io.File
 
 class MainActivity2 : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -31,7 +36,7 @@ class MainActivity2 : ComponentActivity() {
                         color = MaterialTheme.colorScheme.background
                     ) {
                         SendToEmailsContent(
-                            onSend = { senderEmail, senderPassword, email, subject, content ->
+                            onSend = { senderEmail, senderPassword, email, subject, content, imageUri, videoUri ->
                                 withContext(Dispatchers.IO) {
                                     try {
                                         val props = Properties().apply {
@@ -58,7 +63,58 @@ class MainActivity2 : ComponentActivity() {
                                             setFrom(InternetAddress(senderEmail))
                                             setRecipients(Message.RecipientType.TO, InternetAddress.parse(email))
                                             setSubject(subject)
-                                            setText(content)
+
+                                            if (imageUri.isNullOrBlank() && videoUri.isNullOrBlank()) {
+                                                setText(content)
+                                            } else {
+                                                val multipart = MimeMultipart()
+
+                                                // Text part
+                                                val textBodyPart = MimeBodyPart().apply {
+                                                    setText(content, "UTF-8")
+                                                }
+                                                multipart.addBodyPart(textBodyPart)
+
+                                                // Image attachment
+                                                if (!imageUri.isNullOrBlank()) {
+                                                    try {
+                                                        val file = File(imageUri)
+                                                        if (file.exists()) {
+                                                            val imagePart = MimeBodyPart()
+                                                            val dataSource = FileDataSource(file)
+                                                            imagePart.dataHandler = DataHandler(dataSource)
+                                                            imagePart.fileName = file.name
+                                                            multipart.addBodyPart(imagePart)
+                                                            Log.d("MainActivity2", "Attached image from path: $imageUri")
+                                                        } else {
+                                                            Log.w("MainActivity2", "Image file does not exist: $imageUri")
+                                                        }
+                                                    } catch (e: Exception) {
+                                                        Log.e("MainActivity2", "Failed to attach image: ${e.message}", e)
+                                                    }
+                                                }
+
+                                                // Video attachment
+                                                if (!videoUri.isNullOrBlank()) {
+                                                    try {
+                                                        val file = File(videoUri)
+                                                        if (file.exists()) {
+                                                            val videoPart = MimeBodyPart()
+                                                            val dataSource = FileDataSource(file)
+                                                            videoPart.dataHandler = DataHandler(dataSource)
+                                                            videoPart.fileName = file.name
+                                                            multipart.addBodyPart(videoPart)
+                                                            Log.d("MainActivity2", "Attached video from path: $videoUri")
+                                                        } else {
+                                                            Log.w("MainActivity2", "Video file does not exist: $videoUri")
+                                                        }
+                                                    } catch (e: Exception) {
+                                                        Log.e("MainActivity2", "Failed to attach video: ${e.message}", e)
+                                                    }
+                                                }
+
+                                                setContent(multipart)
+                                            }
                                         }
                                         mimeMessage.saveChanges()
 
