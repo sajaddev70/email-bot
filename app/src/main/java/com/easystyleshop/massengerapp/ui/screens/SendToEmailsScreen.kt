@@ -42,11 +42,12 @@ import kotlinx.coroutines.withContext
 import org.apache.poi.ss.usermodel.WorkbookFactory
 import java.text.SimpleDateFormat
 import java.util.*
+import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SendToEmailsContent(
-    onSend: suspend (senderEmail: String, senderPassword: String, recipientEmail: String, subject: String, content: String) -> Boolean
+    onSend: suspend (senderEmail: String, senderPassword: String, recipientEmail: String, subject: String, content: String, imageUri: String?, videoUri: String?) -> Boolean
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -94,6 +95,52 @@ fun SendToEmailsContent(
     // Email Message States
     var subject by remember { mutableStateOf("موضوع پیام تستی") }
     var content by remember { mutableStateOf("سلام، این یک ایمیل تستی خودکار است.") }
+
+    // Optional Attachment States
+    var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
+    var selectedImageName by remember { mutableStateOf("") }
+    var selectedImageSizeStr by remember { mutableStateOf("") }
+    var imageLocalPath by remember { mutableStateOf<String?>(null) }
+
+    var selectedVideoUri by remember { mutableStateOf<Uri?>(null) }
+    var selectedVideoName by remember { mutableStateOf("") }
+    var selectedVideoSizeStr by remember { mutableStateOf("") }
+    var videoLocalPath by remember { mutableStateOf<String?>(null) }
+
+    // Launchers for picking images and videos
+    val imagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent(),
+        onResult = { uri: Uri? ->
+            uri?.let {
+                val sizeBytes = getUriSize(context, it)
+                if (sizeBytes > 5 * 1024 * 1024) {
+                    Toast.makeText(context, "خطا: حجم عکس انتخابی نباید بیشتر از ۵ مگابایت باشد.", Toast.LENGTH_LONG).show()
+                } else {
+                    selectedImageUri = it
+                    selectedImageName = getUriFileName(context, it)
+                    selectedImageSizeStr = String.format(Locale.US, "%.2f MB", sizeBytes.toDouble() / (1024.0 * 1024.0))
+                    imageLocalPath = copyUriToCache(context, it, "attached_image")
+                }
+            }
+        }
+    )
+
+    val videoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent(),
+        onResult = { uri: Uri? ->
+            uri?.let {
+                val sizeBytes = getUriSize(context, it)
+                if (sizeBytes > 5 * 1024 * 1024) {
+                    Toast.makeText(context, "خطا: حجم ویدیو انتخابی نباید بیشتر از ۵ مگابایت باشد.", Toast.LENGTH_LONG).show()
+                } else {
+                    selectedVideoUri = it
+                    selectedVideoName = getUriFileName(context, it)
+                    selectedVideoSizeStr = String.format(Locale.US, "%.2f MB", sizeBytes.toDouble() / (1024.0 * 1024.0))
+                    videoLocalPath = copyUriToCache(context, it, "attached_video")
+                }
+            }
+        }
+    )
 
     // Validation States
     var emailError by remember { mutableStateOf(false) }
@@ -483,6 +530,164 @@ fun SendToEmailsContent(
                 }
             }
 
+            // CARD 3.5: OPTIONAL ATTACHMENTS CARD
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Text(
+                            text = "فایل‌های پیوست پیام (اختیاری - حداکثر ۵ مگابایت)",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = { imagePickerLauncher.launch("image/*") },
+                                enabled = !isServiceRunning,
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                ),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Icon(Icons.Default.Image, contentDescription = null)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("انتخاب عکس", fontSize = 12.sp)
+                            }
+
+                            Button(
+                                onClick = { videoPickerLauncher.launch("video/*") },
+                                enabled = !isServiceRunning,
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                ),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Icon(Icons.Default.VideoLibrary, contentDescription = null)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("انتخاب فیلم", fontSize = 12.sp)
+                            }
+                        }
+
+                        if (imageLocalPath != null || videoLocalPath != null) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f))
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+
+                        // Display selected image details
+                        imageLocalPath?.let { path ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                                    .padding(8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(Icons.Default.Image, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column {
+                                        Text(
+                                            text = selectedImageName.ifEmpty { "تصویر انتخاب شده" },
+                                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                                            maxLines = 1
+                                        )
+                                        Text(
+                                            text = "حجم: $selectedImageSizeStr",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                        )
+                                    }
+                                }
+                                if (!isServiceRunning) {
+                                    IconButton(
+                                        onClick = {
+                                            try {
+                                                File(path).delete()
+                                            } catch (e: Exception) {}
+                                            selectedImageUri = null
+                                            selectedImageName = ""
+                                            selectedImageSizeStr = ""
+                                            imageLocalPath = null
+                                        }
+                                    ) {
+                                        Icon(Icons.Default.Close, contentDescription = "حذف فایل", tint = MaterialTheme.colorScheme.error)
+                                    }
+                                }
+                            }
+                        }
+
+                        if (imageLocalPath != null && videoLocalPath != null) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+
+                        // Display selected video details
+                        videoLocalPath?.let { path ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                                    .padding(8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(Icons.Default.VideoLibrary, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column {
+                                        Text(
+                                            text = selectedVideoName.ifEmpty { "فیلم انتخاب شده" },
+                                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                                            maxLines = 1
+                                        )
+                                        Text(
+                                            text = "حجم: $selectedVideoSizeStr",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                        )
+                                    }
+                                }
+                                if (!isServiceRunning) {
+                                    IconButton(
+                                        onClick = {
+                                            try {
+                                                File(path).delete()
+                                            } catch (e: Exception) {}
+                                            selectedVideoUri = null
+                                            selectedVideoName = ""
+                                            selectedVideoSizeStr = ""
+                                            videoLocalPath = null
+                                        }
+                                    ) {
+                                        Icon(Icons.Default.Close, contentDescription = "حذف فایل", tint = MaterialTheme.colorScheme.error)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // CARD 4: PROGRESS & CONTROL CARD
             item {
                 Card(
@@ -594,7 +799,14 @@ fun SendToEmailsContent(
                     scope.launch(Dispatchers.IO) {
                         val pending = emailQueueDao.getAllPending()
                         if (pending.isNotEmpty()) {
-                            val updated = pending.map { it.copy(subject = subject, content = content) }
+                            val updated = pending.map {
+                                it.copy(
+                                    subject = subject,
+                                    content = content,
+                                    imageUri = imageLocalPath,
+                                    videoUri = videoLocalPath
+                                )
+                            }
                             emailQueueDao.insertAll(updated)
                         }
 
@@ -700,6 +912,74 @@ fun readEmailsFromRawResource(context: Context): List<String> {
         e.printStackTrace()
     }
     return emails
+}
+
+fun getUriSize(context: Context, uri: Uri): Long {
+    var size: Long = 0
+    try {
+        if (uri.scheme == "content") {
+            context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val sizeIndex = cursor.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                    if (sizeIndex != -1) {
+                        size = cursor.getLong(sizeIndex)
+                    }
+                }
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    if (size <= 0) {
+        try {
+            context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { fd ->
+                size = fd.length
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+    return size
+}
+
+fun getUriFileName(context: Context, uri: Uri): String {
+    var name = ""
+    try {
+        if (uri.scheme == "content") {
+            context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    if (nameIndex != -1) {
+                        name = cursor.getString(nameIndex)
+                    }
+                }
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    if (name.isEmpty()) {
+        name = uri.lastPathSegment ?: "file"
+    }
+    return name
+}
+
+fun copyUriToCache(context: Context, uri: Uri, prefix: String): String? {
+    try {
+        val originalName = getUriFileName(context, uri)
+        val ext = originalName.substringAfterLast('.', "")
+        val filename = if (ext.isNotEmpty()) "${prefix}_temp.$ext" else "${prefix}_temp"
+        val cacheFile = File(context.cacheDir, filename)
+        context.contentResolver.openInputStream(uri)?.use { inputStream ->
+            cacheFile.outputStream().use { outputStream ->
+                inputStream.copyTo(outputStream)
+            }
+        }
+        return cacheFile.absolutePath
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    return null
 }
 
 // Read emails from URI helper (targets Column B index 1 and skips row 0 header)

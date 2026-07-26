@@ -101,7 +101,7 @@ fun ProfileScreen(
                             )
                         }
                         "sendToEmails" -> SendToEmailsContent(
-                            onSend = { senderEmail, senderPassword, email, subject, content ->
+                            onSend = { senderEmail, senderPassword, email, subject, content, imageUri, videoUri ->
                                 messageViewModel.sendMessage(token, email, subject, content, state.data?.phoneNumber ?: "نامشخص")
                                 true
                             }
