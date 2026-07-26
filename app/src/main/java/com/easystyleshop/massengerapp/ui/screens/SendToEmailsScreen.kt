@@ -182,6 +182,7 @@ fun SendToEmailsContent(
     var isBatchPaused by remember { mutableStateOf(sharedPrefs.getBoolean("is_batch_paused", false)) }
     var isServiceRunning by remember { mutableStateOf(sharedPrefs.getBoolean("is_service_running", false)) }
     var batchProcessedCount by remember { mutableStateOf(sharedPrefs.getInt("batch_processed_count", 0)) }
+    var serviceStatusMessage by remember { mutableStateOf(sharedPrefs.getString("service_status_message", "سیستم آماده به کار است. شروع به ارسال کنید.") ?: "سیستم آماده به کار است. شروع به ارسال کنید.") }
 
     DisposableEffect(sharedPrefs) {
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
@@ -189,6 +190,7 @@ fun SendToEmailsContent(
                 "is_batch_paused" -> isBatchPaused = prefs.getBoolean("is_batch_paused", false)
                 "is_service_running" -> isServiceRunning = prefs.getBoolean("is_service_running", false)
                 "batch_processed_count" -> batchProcessedCount = prefs.getInt("batch_processed_count", 0)
+                "service_status_message" -> serviceStatusMessage = prefs.getString("service_status_message", "") ?: ""
             }
         }
         sharedPrefs.registerOnSharedPreferenceChangeListener(listener)
@@ -1000,6 +1002,30 @@ fun SendToEmailsContent(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                             )
+                        }
+
+                        // Beautiful live status console log box styled like a terminal
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFF151515), RoundedCornerShape(10.dp))
+                                .padding(14.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.Top) {
+                                Text(
+                                    text = "> ",
+                                    color = Color(0xFF00FF00),
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = serviceStatusMessage,
+                                    color = Color(0xFFDCDCDC),
+                                    fontSize = 13.sp,
+                                    lineHeight = 18.sp
+                                )
+                            }
                         }
                     }
                 }

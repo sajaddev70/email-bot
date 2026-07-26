@@ -38,7 +38,15 @@ class MainActivity2 : ComponentActivity() {
                         SendToEmailsContent(
                             onSend = { senderEmail, senderPassword, email, subject, content, imageUri, videoUri ->
                                 withContext(Dispatchers.IO) {
+                                    val sharedPrefs = getSharedPreferences("sender_prefs", MODE_PRIVATE)
+                                    val updateStatus = { msg: String ->
+                                        sharedPrefs.edit().putString("service_status_message", msg).apply()
+                                        Log.d("MainActivity2", msg)
+                                    }
+
                                     try {
+                                        updateStatus("آماده‌سازی اطلاعات و اتصال برای ارسال به: $email...")
+
                                         val props = Properties().apply {
                                             put("mail.smtp.host", "smtp.gmail.com")
                                             put("mail.smtp.port", "587")
@@ -48,17 +56,12 @@ class MainActivity2 : ComponentActivity() {
                                             put("mail.smtp.ssl.enable", "false")
                                         }
 
-                                        Log.d("MainActivity2", "Initiating Gmail SMTP connection properties: host=smtp.gmail.com, port=587")
-                                        Log.d("MainActivity2", "Configuring Session with Authenticator for $senderEmail")
-
                                         val session = Session.getInstance(props, object : Authenticator() {
                                             override fun getPasswordAuthentication(): PasswordAuthentication {
-                                                Log.d("MainActivity2", "Authenticator callback triggered. Providing credentials for $senderEmail")
                                                 return PasswordAuthentication(senderEmail, senderPassword)
                                             }
                                         })
 
-                                        Log.d("MainActivity2", "Preparing MIME message for recipient: $email")
                                         val mimeMessage = MimeMessage(session).apply {
                                             setFrom(InternetAddress(senderEmail))
                                             setRecipients(Message.RecipientType.TO, InternetAddress.parse(email))
@@ -80,6 +83,7 @@ class MainActivity2 : ComponentActivity() {
                                                     try {
                                                         val file = File(imageUri)
                                                         if (file.exists()) {
+                                                            updateStatus("در حال ضمیمه کردن و آپلود تصویر (${file.name})...")
                                                             val imagePart = MimeBodyPart()
                                                             val dataSource = FileDataSource(file)
                                                             imagePart.dataHandler = DataHandler(dataSource)
@@ -99,6 +103,7 @@ class MainActivity2 : ComponentActivity() {
                                                     try {
                                                         val file = File(videoUri)
                                                         if (file.exists()) {
+                                                            updateStatus("در حال ضمیمه کردن و آپلود ویدیو (${file.name})...")
                                                             val videoPart = MimeBodyPart()
                                                             val dataSource = FileDataSource(file)
                                                             videoPart.dataHandler = DataHandler(dataSource)
@@ -118,21 +123,22 @@ class MainActivity2 : ComponentActivity() {
                                         }
                                         mimeMessage.saveChanges()
 
-                                        Log.d("MainActivity2", "Obtaining SMTP transport and explicitly connecting to guarantee authentication...")
+                                        updateStatus("در حال اتصال به سرور SMTP جیمیل...")
                                         val transport = session.getTransport("smtp")
                                         transport.connect("smtp.gmail.com", senderEmail, senderPassword)
 
-                                        Log.d("MainActivity2", "Sending message via transport.sendMessage()...")
+                                        updateStatus("اتصال برقرار شد. در حال ارسال ایمیل به: $email...")
                                         transport.sendMessage(mimeMessage, mimeMessage.allRecipients)
 
-                                        Log.d("MainActivity2", "Closing transport...")
+                                        updateStatus("در حال بستن اتصال SMTP...")
                                         transport.close()
 
-                                        Log.d("MainActivity2", "Email successfully sent to $email")
+                                        updateStatus("ایمیل با موفقیت به $email ارسال شد! ✅")
                                         true
                                     } catch (e: Exception) {
                                         Log.e("MainActivity2", "Failed to send email to $email. Error: ${e.message}", e)
                                         val errMsg = e.message ?: ""
+                                        updateStatus("خطا در ارسال به $email: $errMsg ❌")
                                         if (errMsg.contains("534-5.7.9") || errMsg.contains("WebLoginRequired")) {
                                             throw AuthenticationFailedException("WebLoginRequired")
                                         } else {

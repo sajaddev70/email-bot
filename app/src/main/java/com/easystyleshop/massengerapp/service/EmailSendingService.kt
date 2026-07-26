@@ -163,14 +163,16 @@ class EmailSendingService : Service() {
 
                     // 2. SMTP Sending (Using composable-provided onSend lambda or local SMTP fallback)
                     var isSuccess = false
+                    var sendingError: Exception? = null
                     try {
                         val senderLambda = onSendLambda
                         if (senderLambda != null) {
                             isSuccess = senderLambda(senderEmail, senderPassword, item.email, item.subject, item.content, item.imageUri, item.videoUri)
                         } else {
-                            isSuccess = sendEmailSmtp(senderEmail, senderPassword, item.email, item.subject, item.content, item.imageUri, item.videoUri)
+                            isSuccess = sendEmailSmtp(sharedPrefs, senderEmail, senderPassword, item.email, item.subject, item.content, item.imageUri, item.videoUri)
                         }
                     } catch (e: Exception) {
+                        sendingError = e
                         val errMsg = e.message ?: ""
                         Log.e("EmailSendingService", "Error sending to ${item.email}: $errMsg", e)
 
@@ -190,12 +192,16 @@ class EmailSendingService : Service() {
                             sharedPrefs.edit()
                                 .putBoolean("is_batch_paused", true)
                                 .putBoolean("is_service_running", false)
+                                .putString("service_status_message", "خطای اعتبارسنجی: ایمیل یا کلمه عبور نادرست است ❌")
                                 .apply()
                             updateNotification("خطای اعتبار سنجی", "کلمه عبور یا ایمیل فرستنده رد شد. ارسال متوقف شد.")
                             stopSelf()
                             return@launch
                         } else if (isNetworkError) {
-                            sharedPrefs.edit().putBoolean("is_service_running", false).apply()
+                            sharedPrefs.edit()
+                                .putBoolean("is_service_running", false)
+                                .putString("service_status_message", "خطای اتصال شبکه: اینترنت در دسترس نیست ❌")
+                                .apply()
                             updateNotification("خطای اتصال شبکه", "اتصال اینترنت برقرار نیست. بعداً تلاش خواهد شد.")
                             stopSelf()
                             return@launch
@@ -217,7 +223,7 @@ class EmailSendingService : Service() {
                             sentAt = System.currentTimeMillis()
                         )
                         db.emailQueueDao().update(updatedItem)
-                    } else {
+                    } else if (sendingError == null) {
                         val updatedItem = item.copy(
                             status = "SMTP_REJECTED",
                             senderEmail = senderEmail,
@@ -229,7 +235,13 @@ class EmailSendingService : Service() {
 
                     sharedPrefs.edit().putInt("batch_processed_count", processedCount + 1).apply()
 
-                    delay(delaySeconds * 1000L)
+                    // Countdown delay with real-time status update
+                    for (sec in delaySeconds downTo 1) {
+                        sharedPrefs.edit()
+                            .putString("service_status_message", "در حال انتظار برای ارسال ایمیل بعدی: $sec ثانیه باقی‌مانده... ⏳")
+                            .apply()
+                        delay(1000L)
+                    }
                 }
             } catch (e: CancellationException) {
                 Log.d("EmailSendingService", "Sending coroutine cancelled.")
@@ -244,10 +256,14 @@ class EmailSendingService : Service() {
     private fun stopSending() {
         sendJob?.cancel()
         val sharedPrefs = getSharedPreferences("sender_prefs", Context.MODE_PRIVATE)
-        sharedPrefs.edit().putBoolean("is_service_running", false).apply()
+        sharedPrefs.edit()
+            .putBoolean("is_service_running", false)
+            .putString("service_status_message", "سرویس ارسال توسط کاربر متوقف شد 🛑")
+            .apply()
     }
 
     private fun sendEmailSmtp(
+        sharedPrefs: android.content.SharedPreferences,
         senderEmail: String,
         senderPassword: String,
         recipientEmail: String,
@@ -256,6 +272,13 @@ class EmailSendingService : Service() {
         imageUri: String?,
         videoUri: String?
     ): Boolean {
+        val updateStatus = { msg: String ->
+            sharedPrefs.edit().putString("service_status_message", msg).apply()
+            Log.d("EmailSendingService", msg)
+        }
+
+        updateStatus("آماده‌سازی اطلاعات برای ارسال به: $recipientEmail...")
+
         val props = Properties().apply {
             put("mail.smtp.host", "smtp.gmail.com")
             put("mail.smtp.port", "587")
@@ -292,6 +315,7 @@ class EmailSendingService : Service() {
                     try {
                         val file = File(imageUri)
                         if (file.exists()) {
+                            updateStatus("در حال ضمیمه کردن و آپلود تصویر (${file.name})...")
                             val imagePart = MimeBodyPart()
                             val dataSource = FileDataSource(file)
                             imagePart.dataHandler = DataHandler(dataSource)
@@ -311,6 +335,7 @@ class EmailSendingService : Service() {
                     try {
                         val file = File(videoUri)
                         if (file.exists()) {
+                            updateStatus("در حال ضمیمه کردن و آپلود ویدیو (${file.name})...")
                             val videoPart = MimeBodyPart()
                             val dataSource = FileDataSource(file)
                             videoPart.dataHandler = DataHandler(dataSource)
@@ -330,10 +355,17 @@ class EmailSendingService : Service() {
         }
         mimeMessage.saveChanges()
 
+        updateStatus("در حال اتصال به SMTP جیمیل...")
         val transport = session.getTransport("smtp")
         transport.connect("smtp.gmail.com", senderEmail, senderPassword)
+
+        updateStatus("اتصال برقرار شد. در حال ارسال ایمیل به: $recipientEmail...")
         transport.sendMessage(mimeMessage, mimeMessage.allRecipients)
+
+        updateStatus("در حال بستن اتصال SMTP...")
         transport.close()
+
+        updateStatus("ایمیل با موفقیت به $recipientEmail ارسال شد! ✅")
         return true
     }
 
