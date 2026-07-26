@@ -47,6 +47,20 @@ class MainActivity2 : ComponentActivity() {
                                     try {
                                         updateStatus("آماده‌سازی اطلاعات و اتصال برای ارسال به: $email...")
 
+                                        // Register JAF DataContentHandlers for Android Compatibility
+                                        try {
+                                            val mc = javax.activation.CommandMap.getDefaultCommandMap() as javax.activation.MailcapCommandMap
+                                            mc.addMailcap("text/html;; x-java-content-handler=com.sun.mail.handlers.text_html")
+                                            mc.addMailcap("text/xml;; x-java-content-handler=com.sun.mail.handlers.text_xml")
+                                            mc.addMailcap("text/plain;; x-java-content-handler=com.sun.mail.handlers.text_plain")
+                                            mc.addMailcap("image/*;; x-java-content-handler=com.sun.mail.handlers.image_gif")
+                                            mc.addMailcap("message/rfc822;; x-java-content-handler=com.sun.mail.handlers.message_rfc822")
+                                            mc.addMailcap("multipart/*;; x-java-content-handler=com.sun.mail.handlers.multipart_mixed")
+                                            javax.activation.CommandMap.setDefaultCommandMap(mc)
+                                        } catch (ex: Exception) {
+                                            Log.e("MainActivity2", "Failed to register JAF Mailcap Command Map: ${ex.message}", ex)
+                                        }
+
                                         val props = Properties().apply {
                                             put("mail.smtp.host", "smtp.gmail.com")
                                             put("mail.smtp.port", "587")
